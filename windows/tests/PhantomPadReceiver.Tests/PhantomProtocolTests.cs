@@ -21,7 +21,9 @@ public class PhantomProtocolTests
     public void Golden_input_frame_matches_android_app()
     {
         // mismo frame que genera ProtocolTest en Kotlin:
-        // seq=1, botones=0x0000010F, LX=-1, RX=1, L2=0.5, R2=0.25
+        // seq=1, botones=0x0000010F, LX=-1f, RX=1f, L2=0.5, R2=0.25.
+        // El codificador de la app aplica clamp a rango -127..127, por eso
+        // el byte de LX es 0x81 (-127) y no 0xFF (-1).
         byte[] frame =
         {
             0x50, 0x50, 0x01, 0x01,
@@ -39,9 +41,9 @@ public class PhantomProtocolTests
         Assert.Equal(1, input.Seq);
         Assert.Equal(PadButtons.Triangle | PadButtons.Circle | PadButtons.Cross |
                      PadButtons.Square | PadButtons.L1, input.Buttons);
-        Assert.Equal(-1, input.LX);
+        Assert.Equal(-127, input.LX);
         Assert.Equal(0, input.LY);
-        Assert.Equal(1, input.RX);
+        Assert.Equal(127, input.RX);
         Assert.Equal(0, input.RY);
         Assert.Equal(128, input.L2);
         Assert.Equal(64, input.R2);
