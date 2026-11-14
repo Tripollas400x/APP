@@ -1,0 +1,30 @@
+# --- Android / Gradle ---
+*.iml
+.gradle/
+.idea/
+.kotlin/
+local.properties
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# --- Windows / .NET ---
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+publish/
+
+# --- CI / misc ---
+.DS_Store
+Thumbs.db
+*.log
+*.apk
+*.aab
+*.zip
+
+# Local secrets (never commit credentials or tokens)
+*.token
+secrets.properties
