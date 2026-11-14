@@ -51,7 +51,7 @@ class ProtocolTest {
             PhantomProtocol.encodePing(0x2A)
         )
         assertArrayEquals(
-            byteArrayOf(0x50.toByte(), 0x50.toByte(), 0x01, 0x10, 0x40, 0x80, 0x74.toByte()),
+            byteArrayOf(0x50.toByte(), 0x50.toByte(), 0x01, 0x10, 0x40, 0x80.toByte(), 0x74.toByte()),
             PhantomProtocol.encodeRumble(0x40, 0x80)
         )
         assertArrayEquals(

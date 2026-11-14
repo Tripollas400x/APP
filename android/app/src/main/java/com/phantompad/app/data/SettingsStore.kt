@@ -13,7 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-private val Context.dataStore by preferencesDataStore(name = "phantom_pad")
+internal val Context.dataStore by preferencesDataStore(name = "phantom_pad")
 
 /** Modos de emulación que puede pedir el receptor. */
 @Serializable

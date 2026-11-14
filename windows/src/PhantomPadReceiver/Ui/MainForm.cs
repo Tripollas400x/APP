@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using PhantomPadReceiver.Core;
 using PhantomPadReceiver.Protocol;
 using PhantomPadReceiver.Virtual;
@@ -180,7 +181,9 @@ public sealed class MainForm : Form
         _lastFrames = _engine.TotalFrames;
         _lastFpsAt = now;
 
-        string padState = _engine.VigemReady ? $"#{_engine.VirtualPadIndex}" : "NO (instala ViGEmBus)";
+        string padState = !_engine.VigemReady ? "NO (instala ViGEmBus)"
+            : _engine.VirtualPadIndex >= 0 ? $"#{_engine.VirtualPadIndex}"
+            : "DS4"; // la librería ViGEm no expone el índice en modo DualShock 4
         _statsLabel.Text =
             $"Dispositivo: {_engine.PhoneName}    Modo: {_engine.Mode}    Mando virtual: {padState}    " +
             $"Frames: {_engine.TotalFrames}    {fps:F0} fps    Failsafe: {_engine.FailsafeEvents}";
@@ -207,7 +210,6 @@ public sealed class MainForm : Form
         DrawFaceButtons(g, f, w, h);
         DrawBumpers(g, f, w, h);
         DrawTriggers(g, f, w, h);
-        DrawCentralButtons(g, f, w, h);
         DrawDpad(g, f, w, h);
         DrawTouchpad(g, f, w, h);
         DrawSticks(g, f, w, h);

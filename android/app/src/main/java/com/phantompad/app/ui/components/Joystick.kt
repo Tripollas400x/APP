@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
@@ -130,7 +131,7 @@ private inline fun applyPointer(
     sensitivity: Float,
     onResult: (Offset, Float, Float) -> Unit
 ) {
-    val radius = size.minDimension / 2f
+    val radius = minOf(size.width, size.height) / 2f
     if (radius <= 0f) return
     val center = Offset(size.width / 2f, size.height / 2f)
     val dx = (position.x - center.x) / radius

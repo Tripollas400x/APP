@@ -5,6 +5,9 @@ using PhantomPadReceiver.Virtual;
 using Windows.Networking.Sockets;
 using Windows.Storage.Streams;
 
+// Con UseWindowsForms, "Timer" choca entre Forms y Threading; aquí siempre es el de hilo de fondo.
+using Timer = System.Threading.Timer;
+
 namespace PhantomPadReceiver.Core;
 
 /// <summary>
@@ -150,8 +153,9 @@ public sealed class ReceiverEngine : IDisposable
                     buffer.AsMemory(PhantomProtocol.HeaderLen, expected - PhantomProtocol.HeaderLen),
                     ct)) break;
 
-            var frame = buffer.AsSpan(0, expected);
-            if (!PhantomProtocol.TryParse(frame, out var parsedType, out var input))
+            // ReadOnlyMemory (no ref struct) para poder cruzar el await del PING.
+            var frame = buffer.AsMemory(0, expected);
+            if (!PhantomProtocol.TryParse(frame.Span, out var parsedType, out var input))
             {
                 Log?.Invoke("Frame con CRC inválido: descartado.");
                 continue;
@@ -167,7 +171,7 @@ public sealed class ReceiverEngine : IDisposable
                     break;
 
                 case FrameType.Ping:
-                    await SendAsync(PhantomProtocol.BuildPong(PhantomProtocol.ReadSeq(frame)));
+                    await SendAsync(PhantomProtocol.BuildPong(PhantomProtocol.ReadSeq(frame.Span)));
                     break;
 
                 case FrameType.ReleaseAll:

@@ -52,6 +52,10 @@ Ver `docs/HID_NOTES.md`.
 
 La app envía estados binarios por RFCOMM/SPP a un receptor C# en el PC, que alimenta un mando virtual Xbox 360 (XInput) o DualShock 4 mediante [ViGEmBus](https://vigem.org/). Es el camino con máxima compatibilidad de juegos. Requisitos: instalar el driver ViGEmBus (una vez) y emparejar teléfono y PC.
 
+**Modo Xbox 360 (recomendado):** compatible con XInput, rumble bidireccional completo y/player LED desde el juego.
+
+**Modo DualShock 4:** los juegos que filtran por DualShock 4 lo detectan como tal; el rumble hacia el teléfono es *mejor esfuerzo* porque la librería ViGEm marca su evento de feedback como obsoleto (limitación documentada en el código).
+
 ## Instalación
 
 - App Android: `docs/INSTALL_ANDROID.md` (APK generada en la pestaña Actions).

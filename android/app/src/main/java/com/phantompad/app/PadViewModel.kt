@@ -43,7 +43,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     private val settingsStore = SettingsStore(app, viewModelScope)
     val settings: StateFlow<AppSettings> = settingsStore.settings
 
-    private val profileStore = ProfileStore(app, viewModelScope)
+    val profileStore = ProfileStore(app, viewModelScope)
 
     val state = GamepadState()
     val gyro = GyroController(app)
@@ -180,6 +180,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
                 t.events.collect { event ->
                     when (event) {
                         is TransportEvent.Rumble -> vibrate(event.small, event.large)
+                        is TransportEvent.RttMeasured -> Unit // el RTT ya vive en vm.latency.stats
                         is TransportEvent.Info -> log.add(event.message)
                         is TransportEvent.Failed -> {
                             log.add("FALLO: ${event.message}")

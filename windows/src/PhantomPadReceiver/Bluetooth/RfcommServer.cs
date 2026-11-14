@@ -5,8 +5,10 @@ using Windows.Storage.Streams;
 namespace PhantomPadReceiver.Bluetooth;
 
 /// <summary>
-/// Servidor RFCOMM/SPP (APIs WinRT nativas de Windows 10/11, sin dependencias
-/// externas). Publica el servicio y entrega cada conexión entrante al motor.
+/// Servidor RFCOMM/SPP con las APIs WinRT nativas de Windows 10/11 (sin
+/// dependencias externas). Publica el registro SDP y enlaza un
+/// StreamSocketListener al servicio; las conexiones entrantes llegan por el
+/// evento ConnectionReceived del listener y se entregan al motor.
 /// Requiere que el teléfono esté emparejado con el PC.
 /// </summary>
 public sealed class RfcommServer
@@ -21,6 +23,7 @@ public sealed class RfcommServer
     public event Action<string>? Log;
 
     private RfcommServiceProvider? _provider;
+    private StreamSocketListener? _listener;
 
     public bool IsAdvertising => _provider != null;
 
@@ -36,14 +39,20 @@ public sealed class RfcommServer
         writer.WriteString(ServiceName);
         provider.SdpRawAttributes.Add(0x0100, writer.DetachBuffer());
 
-        provider.ConnectionReceived += OnConnectionReceived;
-        provider.StartAdvertising();
+        // El proveedor RFCOMM no expone eventos: las conexiones se reciben a
+        // través de un StreamSocketListener enlazado al UUID del servicio.
+        var listener = new StreamSocketListener();
+        listener.ConnectionReceived += OnListenerConnectionReceived;
+        await listener.BindServiceNameAsync(provider.ServiceId.AsString(), SocketProtectionLevel.PlainSocket);
+        provider.StartAdvertising(listener);
+
+        _listener = listener;
         _provider = provider;
 
         Log?.Invoke("Servicio RFCOMM publicado. Esperando la conexión del teléfono...");
     }
 
-    private async void OnConnectionReceived(RfcommServiceProvider sender, RfcommConnectionEventArgs args)
+    private async void OnListenerConnectionReceived(StreamSocketListener sender, StreamSocketListenerConnectionReceivedEventArgs args)
     {
         try
         {
@@ -72,9 +81,12 @@ public sealed class RfcommServer
     public void Stop()
     {
         var provider = _provider;
+        var listener = _listener;
         _provider = null;
+        _listener = null;
         if (provider == null) return;
-        provider.ConnectionReceived -= OnConnectionReceived;
+        if (listener != null) listener.ConnectionReceived -= OnListenerConnectionReceived;
         try { provider.StopAdvertising(); } catch { /* al cerrar puede fallar y no importa */ }
+        try { listener?.Dispose(); } catch { }
     }
 }
