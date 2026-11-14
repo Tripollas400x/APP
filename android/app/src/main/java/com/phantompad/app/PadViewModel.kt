@@ -54,6 +54,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     private var transport: Transport? = null
     private var eventJob: Job? = null
     private var reconnectJob: Job? = null
+    private var connectingJob: Job? = null
 
     private val _transportState = MutableStateFlow(TransportState.DISCONNECTED)
     val transportState: StateFlow<TransportState> = _transportState
@@ -64,6 +65,22 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Atenuar el giroscopio según ajustes al arrancar.
         viewModelScope.launch { gyro.setEnabled(settings.value.gyroEnabled) }
+        // Modo HID: registrar el servicio al abrir la app para detectar en vivo
+        // la conexión del PC (sin pulsar nada).
+        ensureHidMonitor()
+        viewModelScope.launch {
+            settings.collect { ensureHidMonitor() }
+        }
+        viewModelScope.launch {
+            bt.enabled.collect { on ->
+                if (on) {
+                    ensureHidMonitor()
+                } else {
+                    // Bluetooth apagado: la sesión HID murió a nivel sistema.
+                    if (transport is HidTransport) disconnectInternal()
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- ajustes
@@ -91,8 +108,9 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     // -------------------------------------------------------------- conexión
 
     fun connectTo(device: BtDeviceUi) {
-        viewModelScope.launch {
-            disconnectInternal()
+        // Cancela cualquier intento anterior para no dejar dos bucles conectando.
+        connectingJob?.cancel()
+        connectingJob = viewModelScope.launch {
             val target = bt.getDevice(device.address)
             if (target == null) {
                 log.add("No se pudo resolver el dispositivo ${device.address}")
@@ -138,12 +156,46 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
         state.reset()
     }
 
+    /** La UI avisa que ya hay permisos: reactiva la supervisión HID automática. */
+    fun notifyPermissionsGranted() = ensureHidMonitor()
+
+    /**
+     * Modo HID: crea el transporte y registra el servicio HID aunque el
+     * usuario no haya pulsado Conectar. Así, si el PC se conecta desde
+     * ajustes Bluetooth o desde Windows, el estado se actualiza solo.
+     */
+    private fun ensureHidMonitor() {
+        if (transport != null) return
+        if (settings.value.transportMode != TransportModeWire.HID) return
+        if (bt.adapter?.isEnabled != true || !bt.hasPermissions()) return
+        val t = HidTransport(getApplication(), log)
+        transport = t
+        observeTransport(t)
+        _transportState.value = TransportState.DISCONNECTED
+        viewModelScope.launch { t.prepare() }
+        log.add("HID: supervisión automática activa; detecta al PC sin pulsar nada.")
+    }
+
     private suspend fun startTransport(target: android.bluetooth.BluetoothDevice, ui: BtDeviceUi, retries: Int) {
         val mode = settings.value.transportMode
-        val t: Transport = if (mode == TransportModeWire.HID) {
-            HidTransport(getApplication(), log)
+        val current = transport
+        val t: Transport = if (
+            mode == TransportModeWire.HID &&
+            current is HidTransport &&
+            current.state.value != TransportState.FAILED &&
+            (current.connectedAddress == null || current.connectedAddress == target.address)
+        ) {
+            // Reutiliza el servicio HID ya registrado (monitor): evita
+            // des-registrar y volver a registrar en cada intento.
+            log.add("Reutilizando el servicio HID ya registrado.")
+            current
         } else {
-            RfcommTransport(viewModelScope, log, latency)
+            disconnectInternal()
+            if (mode == TransportModeWire.HID) {
+                HidTransport(getApplication(), log)
+            } else {
+                RfcommTransport(viewModelScope, log, latency)
+            }
         }
         transport = t
         observeTransport(t)
@@ -157,7 +209,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
             if (ok) {
                 _transportState.value = TransportState.CONNECTED
                 state.reset()
-                hub.start(t)
+                if (!hub.isRunning) hub.start(t)
                 log.add("Modo mando activo (${mode}).")
                 return
             }
@@ -175,7 +227,39 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     private fun observeTransport(t: Transport) {
         eventJob?.cancel()
         eventJob = viewModelScope.launch {
-            launch { t.state.collect { _transportState.value = it } }
+            launch {
+                t.state.collect { s ->
+                    _transportState.value = s
+                    when (s) {
+                        TransportState.CONNECTED -> {
+                            // La conexión puede llegar sola (HID): arrancar el envío.
+                            if (!hub.isRunning) {
+                                state.reset()
+                                hub.start(t)
+                            }
+                        }
+                        TransportState.DISCONNECTED, TransportState.FAILED -> {
+                            if (hub.isRunning) {
+                                hub.stop()
+                                state.reset()
+                            }
+                            _connectedDevice.value = null
+                        }
+                        TransportState.CONNECTING -> Unit
+                    }
+                }
+            }
+            launch {
+                t.deviceName.collect { name ->
+                    if (t.state.value == TransportState.CONNECTED && name != null) {
+                        _connectedDevice.value = BtDeviceUi(
+                            name,
+                            settings.value.lastDeviceAddress ?: "",
+                            true
+                        )
+                    }
+                }
+            }
             launch {
                 t.events.collect { event ->
                     when (event) {

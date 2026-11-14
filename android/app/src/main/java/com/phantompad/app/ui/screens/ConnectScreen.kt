@@ -63,6 +63,7 @@ fun ConnectScreen(
     val devices by vm.bt.devices.collectAsState()
     val btEnabled by vm.bt.enabled.collectAsState()
     val transportState by vm.transportState.collectAsState()
+    val connectedDevice by vm.connectedDevice.collectAsState()
     val log by vm.log.entries.collectAsState()
 
     LaunchedEffect(transportState) {
@@ -179,7 +180,10 @@ fun ConnectScreen(
                     Spacer(Modifier.width(8.dp))
                     Text("Conectando...", color = WarnAmber, style = MaterialTheme.typography.labelSmall)
                 }
-                TransportState.CONNECTED -> StatusLine(OkGreen, "Conectado")
+                TransportState.CONNECTED -> StatusLine(
+                    OkGreen,
+                    connectedDevice?.name?.let { "Conectado a $it" } ?: "Conectado"
+                )
                 TransportState.FAILED -> StatusLine(ErrRed, "Fallo: ver Diagnóstico")
                 TransportState.DISCONNECTED -> StatusLine(TextSecondary, "Desconectado")
             }

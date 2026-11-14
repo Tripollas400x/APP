@@ -54,6 +54,11 @@ private fun AppRoot(vm: PadViewModel) {
         if (!granted) permissionLauncher.launch(vm.bt.requiredPermissions())
     }
 
+    LaunchedEffect(granted) {
+        // Con permisos concedidos, activar la supervisión HID automática.
+        if (granted) vm.notifyPermissionsGranted()
+    }
+
     NavHost(navController = nav, startDestination = "welcome") {
         composable("welcome") {
             WelcomeScreen(

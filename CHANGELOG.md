@@ -4,6 +4,36 @@ Todas las cambios notables de este proyecto se documentan aquí.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.1.3] - 2026-11-15
+
+### Corregido
+- HID directo: la app no reflejaba la conexión que ya existía a nivel
+  sistema (Windows mostraba el mando y el celular aparecía "conectado a
+  DESKTOP-XXXX", pero la app decía "Desconectado").
+  - `HidTransport`: añadido `onConnectionStateChanged` al callback HID;
+    ahora cualquier conexión/desconexión del host actualiza el estado en
+    vivo sin pulsar nada.
+  - `HidTransport.prepare()`: al abrir la app (modo HID) se registra el
+    servicio y se consulta `getConnectedDevices()`, de modo que un PC ya
+    conectado se detecta al instante y el botón Conectar no repite el
+    registro (antes expiraba a los 12 s esperando "plugged").
+  - `PadViewModel`: supervisión automática en modo HID (arranque, cambio
+    de ajustes, activación de Bluetooth y concesión de permisos); el bucle
+    de envío arranca solo cuando la conexión aparece y se detiene al caer.
+  - El botón Conectar reutiliza el servicio HID ya registrado en vez de
+    des-registrarlo y volver a registrarlo; detecta "ya conectado" al
+    mismo host y maneja el cambio de host.
+  - Pantalla Conectar muestra el nombre del host ("Conectado a
+    DESKTOP-XXXX").
+
+## [0.1.2] - 2026-11-15
+
+### Corregido
+- APK release ahora firmado (keystore versionado en el repo, firma
+  estable): el error "el paquete no es válido" al instalar venía del
+  artefacto `release-unsigned`. La CI publica el APK firmado y en tags
+  crea un Release con descarga directa.
+
 ## [0.1.1] - 2026-11-15
 
 ### Corregido
