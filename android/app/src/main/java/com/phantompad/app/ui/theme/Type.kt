@@ -11,23 +11,30 @@ import androidx.compose.ui.unit.sp
  * títulos compactos con tracking amplio, datos en mono para el diagnóstico.
  */
 val PhantomTypography = Typography(
+    displaySmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Black,
+        fontSize = 46.sp,
+        lineHeight = 46.sp,
+        letterSpacing = (-1.8).sp
+    ),
     headlineMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Bold,
-        fontSize = 28.sp,
-        letterSpacing = 2.sp
+        fontSize = 29.sp,
+        letterSpacing = (-0.8).sp
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 20.sp,
-        letterSpacing = 1.5.sp
+        letterSpacing = (-0.35).sp
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 16.sp,
-        letterSpacing = 0.8.sp
+        letterSpacing = 0.sp
     ),
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -36,7 +43,7 @@ val PhantomTypography = Typography(
         lineHeight = 20.sp
     ),
     labelSmall = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
         letterSpacing = 0.5.sp

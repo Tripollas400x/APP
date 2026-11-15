@@ -15,6 +15,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -25,9 +29,8 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.phantompad.app.protocol.ButtonId
-import com.phantompad.app.ui.theme.Accent
 import com.phantompad.app.ui.theme.BorderGlow
-import com.phantompad.app.ui.theme.SurfaceElevated
+import com.phantompad.app.ui.theme.DirectionBlue
 
 /**
  * Cruceta direccional con zonas cruzadas y soporte de diagonales (dos
@@ -39,7 +42,8 @@ fun DPad(
     opacity: Float,
     hapticsEnabled: Boolean,
     onDirection: (ButtonId, Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     var pressedDirs by remember { mutableStateOf(setOf<ButtonId>()) }
     val haptic = LocalHapticFeedback.current
@@ -48,7 +52,7 @@ fun DPad(
         modifier = modifier
             .size(side)
             .graphicsLayer { alpha = opacity }
-            .pointerInput(hapticsEnabled) {
+            .then(if (interactive) Modifier.pointerInput(hapticsEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -77,7 +81,7 @@ fun DPad(
                         pressedDirs = emptySet()
                     }
                 }
-            }
+            } else Modifier)
     ) {
         Canvas(Modifier.fillMaxSize()) {
             drawCross(pressedDirs)
@@ -100,48 +104,38 @@ private fun zonesFor(position: Offset, size: androidx.compose.ui.unit.IntSize): 
 }
 
 private fun DrawScope.drawCross(pressedDirs: Set<ButtonId>) {
-    val w = size.width
-    val arm = w * 0.30f
-    val thickness = w * 0.36f
-    val center = this.center
-    val radius = CornerRadius(10.dp.toPx())
-
-    fun armColor(active: Boolean) =
-        if (active) Accent.copy(alpha = 0.35f) else SurfaceElevated.copy(alpha = 0.6f)
-
-    val up = ButtonId.DPAD_UP in pressedDirs
-    val down = ButtonId.DPAD_DOWN in pressedDirs
-    val left = ButtonId.DPAD_LEFT in pressedDirs
-    val right = ButtonId.DPAD_RIGHT in pressedDirs
-
-    drawRoundRect(
-        color = armColor(up),
-        topLeft = Offset(center.x - thickness / 2f, center.y - arm),
-        size = Size(thickness, arm + thickness / 2f),
-        cornerRadius = radius
-    )
-    drawRoundRect(
-        color = armColor(down),
-        topLeft = Offset(center.x - thickness / 2f, center.y - thickness / 2f),
-        size = Size(thickness, arm + thickness / 2f),
-        cornerRadius = radius
-    )
-    drawRoundRect(
-        color = armColor(left),
-        topLeft = Offset(center.x - arm, center.y - thickness / 2f),
-        size = Size(arm + thickness / 2f, thickness),
-        cornerRadius = radius
-    )
-    drawRoundRect(
-        color = armColor(right),
-        topLeft = Offset(center.x - thickness / 2f, center.y - thickness / 2f),
-        size = Size(arm + thickness / 2f, thickness),
-        cornerRadius = radius
-    )
-    drawCircle(
-        color = BorderGlow,
-        radius = thickness * 0.22f,
-        center = center,
-        style = Stroke(1.dp.toPx())
-    )
+    val c = center
+    val unit = size.minDimension
+    drawCircle(Color(0xFF242426), unit * .48f)
+    drawCircle(BorderGlow, unit * .47f, style = Stroke(1.dp.toPx()))
+    DPadDirections.forEachIndexed { index, id ->
+        val pressed = id in pressedDirs
+        rotate(index * 90f, c) {
+            val start = Offset(c.x - unit * .153f, c.y - unit * .425f)
+            val size = Size(unit * .306f, unit * .28f)
+            val curve = CornerRadius(unit * .06f)
+            drawRoundRect(
+                Brush.verticalGradient(
+                    if (pressed) listOf(Color(0xFF373E49), Color(0xFF252A32))
+                    else listOf(Color(0xFF474749), Color(0xFF171718)),
+                    start.y, start.y + size.height
+                ),
+                start, size, curve
+            )
+            drawRoundRect(
+                if (pressed) DirectionBlue else BorderGlow, start, size, curve,
+                style = Stroke(1.dp.toPx())
+            )
+            val arrowY = c.y - unit * .29f
+            val arrow = Path().apply {
+                moveTo(c.x, arrowY - unit * .047f)
+                lineTo(c.x + unit * .047f, arrowY + unit * .027f)
+                lineTo(c.x - unit * .047f, arrowY + unit * .027f)
+                close()
+            }
+            drawPath(arrow, DirectionBlue.copy(alpha = if (pressed) 1f else .73f))
+        }
+    }
 }
+
+private val DPadDirections = listOf(ButtonId.DPAD_UP, ButtonId.DPAD_RIGHT, ButtonId.DPAD_DOWN, ButtonId.DPAD_LEFT)

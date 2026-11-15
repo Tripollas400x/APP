@@ -44,8 +44,15 @@ class ProfileStore(context: Context, scope: CoroutineScope) {
         }
     }
 
-    fun layoutOf(profile: ProfileId): PadLayout =
-        _overrides.value[profile.name] ?: LayoutProfiles.default(profile)
+    fun layoutOf(profile: ProfileId): PadLayout {
+        val saved = _overrides.value[profile.name] ?: return LayoutProfiles.default(profile)
+        val defaults = LayoutProfiles.default(profile)
+        return if (saved.geometryVersion >= 2) {
+            saved.copy(elements = defaults.elements + saved.elements)
+        } else {
+            saved
+        }
+    }
 
     suspend fun save(profile: ProfileId, layout: PadLayout) {
         appContext.dataStore.edit { prefs ->
