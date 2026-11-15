@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using PhantomPadReceiver.Bluetooth;
 using PhantomPadReceiver.Core;
 using PhantomPadReceiver.Protocol;
 using PhantomPadReceiver.Virtual;
@@ -12,7 +13,7 @@ namespace PhantomPadReceiver.Ui;
 /// </summary>
 public sealed class MainForm : Form
 {
-    private const string AppVersion = "v0.2.0";
+    private const string AppVersion = "v0.2.1";
 
     private readonly ReceiverEngine _engine = new();
 
@@ -40,11 +41,14 @@ public sealed class MainForm : Form
     };
     private readonly Button _clearLogButton = new() { Text = "Limpiar", Width = 90, Height = 28 };
     private readonly Button _copyLogButton = new() { Text = "Copiar registro", Width = 130, Height = 28 };
+    private readonly Button _saveLogButton = new() { Text = "Guardar registro...", Width = 140, Height = 28 };
+    private readonly Button _testButton = new() { Text = "Prueba local (joy.cpl)", Width = 160, Height = 32 };
     private readonly StatusPill _pill = new() { Width = 340, Height = 40 };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
 
     private long _lastFrames;
     private DateTime _lastFpsAt = DateTime.UtcNow;
+    private string? _lastShownServerError;
 
     private static readonly Color AccentColor = Color.FromArgb(158, 123, 255);
     private static readonly Color PanelDark = Color.FromArgb(10, 10, 14);
@@ -106,7 +110,9 @@ public sealed class MainForm : Form
         _modeCombo.Location = new Point(60, 78);
         _startButton.Location = new Point(224, 74);
         _stopButton.Location = new Point(342, 74);
-        _helpLink.Location = new Point(468, 81);
+        _testButton.Location = new Point(460, 74);
+        _helpLink.Location = new Point(628, 81);
+        StyleButton(_testButton);
 
         _pill.Location = new Point(16, 118);
         _infoLabel.Location = new Point(16, 160);
@@ -119,6 +125,7 @@ public sealed class MainForm : Form
         top.Controls.Add(_modeCombo);
         top.Controls.Add(_startButton);
         top.Controls.Add(_stopButton);
+        top.Controls.Add(_testButton);
         top.Controls.Add(_helpLink);
         top.Controls.Add(_pill);
         top.Controls.Add(_infoLabel);
@@ -128,10 +135,13 @@ public sealed class MainForm : Form
         var logButtons = new Panel { Dock = DockStyle.Top, Height = 38, BackColor = HeaderDark };
         _clearLogButton.Location = new Point(8, 5);
         _copyLogButton.Location = new Point(106, 5);
+        _saveLogButton.Location = new Point(244, 5);
         StyleButton(_clearLogButton);
         StyleButton(_copyLogButton);
+        StyleButton(_saveLogButton);
         logButtons.Controls.Add(_clearLogButton);
         logButtons.Controls.Add(_copyLogButton);
+        logButtons.Controls.Add(_saveLogButton);
         logPanel.Controls.Add(_logBox);
         logPanel.Controls.Add(logButtons);
 
@@ -164,6 +174,21 @@ public sealed class MainForm : Form
             UpdateUi();
         };
 
+        // Test A (sin teléfono): barrido por el mando virtual para joy.cpl.
+        _testButton.Click += async (s, e) =>
+        {
+            _testButton.Enabled = false;
+            try
+            {
+                await _engine.RunLocalTestAsync();
+            }
+            catch (Exception ex)
+            {
+                AppendLog("ERROR: " + RfcommServer.Detail(ex));
+            }
+            UpdateUi();
+        };
+
         _helpLink.LinkClicked += (s, e) =>
         {
             try
@@ -185,6 +210,7 @@ public sealed class MainForm : Form
                 AppendLog("Registro copiado al portapapeles.");
             }
         };
+        _saveLogButton.Click += (s, e) => ExportLog();
 
         _uiTimer.Tick += (s, e) =>
         {
@@ -239,6 +265,10 @@ public sealed class MainForm : Form
         {
             _pill.SetStatus(StatusPill.State.Connected, "Conectado a " + _engine.PhoneName);
         }
+        else if (advertising && _engine.PadError != null)
+        {
+            _pill.SetStatus(StatusPill.State.Error, "Esperando teléfono… (mando virtual reintentando)");
+        }
         else if (advertising)
         {
             _pill.SetStatus(StatusPill.State.Waiting, "Esperando teléfono… (Bluetooth visible)");
@@ -256,6 +286,33 @@ public sealed class MainForm : Form
         _startButton.Enabled = !busy;
         _stopButton.Enabled = busy;
         _modeCombo.Enabled = !busy;
+        _testButton.Enabled = _engine.VigemReady && !_engine.LocalTestRunning;
+    }
+
+    /// <summary>Exporta el registro a un .log sin datos privados (solo eventos).</summary>
+    private void ExportLog()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "Registro de texto (*.log)|*.log|Texto (*.txt)|*.txt",
+            FileName = $"PhantomPadReceiver_{DateTime.Now:yyyyMMdd_HHmmss}.log"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var header =
+                "Phantom Pad Receiver " + AppVersion + "\n" +
+                "Fecha: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\n" +
+                "Driver ViGEmBus: " + (VirtualController.DriverInstalled ? "instalado" : "NO instalado") + "\n" +
+                "Modo: " + _engine.Mode + "\n" +
+                new string('-', 60) + "\n";
+            File.WriteAllText(dialog.FileName, header + _logBox.Text);
+            AppendLog("Registro guardado en " + dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            AppendLog("ERROR: no se pudo guardar el registro: " + ex.Message);
+        }
     }
 
     private void UpdateStats()
@@ -275,6 +332,10 @@ public sealed class MainForm : Form
         {
             pad = "DualShock 4 (fallback)";
         }
+        else if (_engine.PadIndexPending)
+        {
+            pad = "Xbox360 (índice pendiente, operativo)";
+        }
         else if (_engine.VirtualPadIndex >= 0)
         {
             pad = $"Xbox360 #{_engine.VirtualPadIndex}";
@@ -285,10 +346,18 @@ public sealed class MainForm : Form
         }
 
         string driver = VirtualController.DriverInstalled ? "OK" : "NO instalado";
+        string server = _engine.ServerError != null ? "ERROR" : (_engine.Advertising ? "publicado" : "detenido");
         _infoLabel.Text =
-            $"Mando: {pad}    Driver ViGEmBus: {driver}    Teléfono: {_engine.PhoneName}    " +
-            $"Frames: {_engine.TotalFrames} ({fps:F0} fps)    Failsafe: {_engine.FailsafeEvents}";
-        _infoLabel.ForeColor = _engine.VigemReady ? Color.Gainsboro : WarnAmber;
+            $"Mando: {pad}    ViGEmBus: {driver}    BT: {server}    Teléfono: {_engine.PhoneName}    " +
+            $"Frames: {_engine.TotalFrames} ({fps:F0} fps)    Rechazados: {_engine.RejectedFrames}    " +
+            $"Failsafe: {_engine.FailsafeEvents}";
+        _infoLabel.ForeColor = _engine.VigemReady && _engine.ServerError == null ? Color.Gainsboro : WarnAmber;
+        // Muestra el error del servidor completo una sola vez (no en cada tick).
+        if (_engine.ServerError != null && _engine.ServerError != _lastShownServerError)
+        {
+            _lastShownServerError = _engine.ServerError;
+            AppendLog("BT: " + _engine.ServerError, LogSeverity.Error);
+        }
     }
 
     private enum LogSeverity { Info, Ok, Warn, Error }
