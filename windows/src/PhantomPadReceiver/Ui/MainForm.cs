@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using PhantomPadReceiver.Bluetooth;
 using PhantomPadReceiver.Core;
-using PhantomPadReceiver.Protocol;
 using PhantomPadReceiver.Virtual;
 
 namespace PhantomPadReceiver.Ui;
@@ -13,38 +12,63 @@ namespace PhantomPadReceiver.Ui;
 /// </summary>
 public sealed class MainForm : Form
 {
-    private const string AppVersion = "v0.2.2";
+    private const string AppVersion = "v0.3.0";
 
     private readonly ReceiverEngine _engine = new();
 
     private readonly ComboBox _modeCombo = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 150,
+        Width = 142,
         FlatStyle = FlatStyle.Flat,
-        BackColor = Color.FromArgb(28, 28, 40),
-        ForeColor = Color.Gainsboro
+        BackColor = ReceiverTheme.Raised,
+        ForeColor = ReceiverTheme.Text,
+        Margin = new Padding(0, 7, 10, 0)
     };
 
-    private readonly Button _startButton = new() { Text = "Iniciar", Width = 110, Height = 32 };
-    private readonly Button _stopButton = new() { Text = "Detener", Width = 110, Height = 32 };
-    private readonly LinkLabel _helpLink = new() { Text = "Guía del driver ViGEmBus", AutoSize = true };
-    private readonly Label _infoLabel = new() { AutoSize = true };
-    private readonly Panel _padPanel = new() { Dock = DockStyle.Fill };
+    private readonly Button _startButton = new() { Text = "Iniciar", Width = 102 };
+    private readonly Button _stopButton = new() { Text = "Detener", Width = 102 };
+    private readonly Button _testButton = new() { Text = "Prueba local (joy.cpl)", Width = 164 };
+    private readonly LinkLabel _helpLink = new()
+    {
+        Text = "ViGEmBus",
+        AutoSize = true,
+        LinkColor = ReceiverTheme.Text,
+        ActiveLinkColor = ReceiverTheme.Text,
+        VisitedLinkColor = ReceiverTheme.Muted,
+        Margin = new Padding(6, 9, 2, 0)
+    };
+    private readonly TextBox _infoLabel = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        Multiline = true,
+        ScrollBars = ScrollBars.Vertical,
+        BackColor = ReceiverTheme.Card,
+        ForeColor = ReceiverTheme.Muted,
+        BorderStyle = BorderStyle.None,
+        Font = new Font("Consolas", 9f)
+    };
+    private readonly ControllerMonitor _padPanel = new() { Dock = DockStyle.Fill };
     private readonly RichTextBox _logBox = new()
     {
         Dock = DockStyle.Fill,
         ReadOnly = true,
-        BackColor = Color.FromArgb(12, 12, 18),
+        BackColor = ReceiverTheme.Background,
+        ForeColor = ReceiverTheme.Text,
         BorderStyle = BorderStyle.None,
-        Font = new Font("Consolas", 9f)
+        Font = new Font("Consolas", 9f),
+        DetectUrls = false
     };
-    private readonly Button _clearLogButton = new() { Text = "Limpiar", Width = 90, Height = 28 };
-    private readonly Button _copyLogButton = new() { Text = "Copiar registro", Width = 130, Height = 28 };
-    private readonly Button _saveLogButton = new() { Text = "Guardar registro...", Width = 140, Height = 28 };
-    private readonly Button _testButton = new() { Text = "Prueba local (joy.cpl)", Width = 160, Height = 32 };
-    private readonly StatusPill _pill = new() { Width = 340, Height = 40 };
+    private readonly Button _clearLogButton = new() { Text = "Limpiar", Width = 78 };
+    private readonly Button _copyLogButton = new() { Text = "Copiar registro", Width = 113 };
+    private readonly Button _saveLogButton = new() { Text = "Guardar registro…", Width = 127 };
+    private readonly StatusPill _pill = new() { Dock = DockStyle.Fill, Margin = new Padding(8, 7, 0, 7) };
+    private readonly Label _rtt = new();
+    private readonly Label _rate = new();
+    private readonly Label _failsafe = new();
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
+    private readonly System.Windows.Forms.Timer _previewTimer = new() { Interval = 33 };
 
     private ReceiverDiagnostics _lastStats;
     private long _lastFpsAt = Stopwatch.GetTimestamp();
@@ -52,108 +76,28 @@ public sealed class MainForm : Form
     private bool _closeAllowed;
     private readonly bool _driverInstalled = VirtualController.DriverInstalled;
     private string? _lastShownServerError;
-
-    private static readonly Color AccentColor = Color.FromArgb(158, 123, 255);
-    private static readonly Color PanelDark = Color.FromArgb(10, 10, 14);
-    private static readonly Color HeaderDark = Color.FromArgb(14, 14, 20);
-    private static readonly Color ControlOff = Color.FromArgb(40, 40, 56);
-    private static readonly Color ControlHover = Color.FromArgb(56, 56, 78);
-    private static readonly Color OkGreen = Color.FromArgb(76, 175, 80);
-    private static readonly Color WarnAmber = Color.FromArgb(255, 183, 77);
-    private static readonly Color ErrRed = Color.FromArgb(239, 83, 80);
-
-    private static readonly (PadButtons Button, string Label, float Fx, float Fy, Color Color)[] FaceButtons =
-    {
-        (PadButtons.Triangle, "Y", 0.78f, 0.42f, Color.FromArgb(0, 168, 107)),
-        (PadButtons.Circle,   "B", 0.86f, 0.55f, Color.FromArgb(244, 67, 54)),
-        (PadButtons.Cross,    "A", 0.78f, 0.68f, Color.FromArgb(33, 150, 243)),
-        (PadButtons.Square,   "X", 0.70f, 0.55f, Color.FromArgb(232, 121, 249))
-    };
+    private string _technicalDetails = "";
 
     public MainForm()
     {
         Text = "Phantom Pad Receiver " + AppVersion;
-        Size = new Size(980, 720);
-        MinimumSize = new Size(860, 600);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
+        ClientSize = new Size(1110, 734);
+        MinimumSize = new Size(875, 602);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = PanelDark;
-        Font = new Font("Segoe UI", 9.5f);
+        BackColor = ReceiverTheme.Background;
+        ForeColor = ReceiverTheme.Text;
+        Font = new Font("Segoe UI", 10f);
         DoubleBuffered = true;
 
         _modeCombo.DataSource = Enum.GetValues<PadMode>();
-
-        // ---------------------------------------------------------- cabecera
-        var top = new Panel { Dock = DockStyle.Top, Height = 273, BackColor = HeaderDark };
-
-        var title = new Label
+        foreach (var button in new[] { _stopButton, _testButton, _clearLogButton, _copyLogButton, _saveLogButton })
         {
-            Text = "PHANTOM PAD RECEIVER",
-            AutoSize = true,
-            Font = new Font("Segoe UI", 15f, FontStyle.Bold),
-            ForeColor = AccentColor,
-            Location = new Point(16, 10)
-        };
-        var version = new Label
-        {
-            Text = AppVersion,
-            AutoSize = true,
-            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(120, 110, 160),
-            Location = new Point(305, 20)
-        };
-        var subtitle = new Label
-        {
-            Text = "Bluetooth del teléfono → mando virtual (ViGEmBus) en Windows",
-            AutoSize = true,
-            ForeColor = Color.Silver,
-            Location = new Point(16, 44)
-        };
-
-        var modeLabel = new Label { Text = "Modo:", AutoSize = true, Location = new Point(16, 82) };
-        _modeCombo.Location = new Point(60, 78);
-        _startButton.Location = new Point(224, 74);
-        _stopButton.Location = new Point(342, 74);
-        _testButton.Location = new Point(460, 74);
-        _helpLink.Location = new Point(628, 81);
-        StyleButton(_testButton);
-
-        _pill.Location = new Point(16, 118);
-        _infoLabel.Location = new Point(16, 160);
-        _infoLabel.ForeColor = Color.Gainsboro;
-
-        top.Controls.Add(title);
-        top.Controls.Add(version);
-        top.Controls.Add(subtitle);
-        top.Controls.Add(modeLabel);
-        top.Controls.Add(_modeCombo);
-        top.Controls.Add(_startButton);
-        top.Controls.Add(_stopButton);
-        top.Controls.Add(_testButton);
-        top.Controls.Add(_helpLink);
-        top.Controls.Add(_pill);
-        top.Controls.Add(_infoLabel);
-
-        // --------------------------------------------------------------- log
-        var logPanel = new Panel { Dock = DockStyle.Bottom, Height = 196, BackColor = PanelDark };
-        var logButtons = new Panel { Dock = DockStyle.Top, Height = 38, BackColor = HeaderDark };
-        _clearLogButton.Location = new Point(8, 5);
-        _copyLogButton.Location = new Point(106, 5);
-        _saveLogButton.Location = new Point(244, 5);
-        StyleButton(_clearLogButton);
-        StyleButton(_copyLogButton);
-        StyleButton(_saveLogButton);
-        logButtons.Controls.Add(_clearLogButton);
-        logButtons.Controls.Add(_copyLogButton);
-        logButtons.Controls.Add(_saveLogButton);
-        logPanel.Controls.Add(_logBox);
-        logPanel.Controls.Add(logButtons);
-
-        _padPanel.BackColor = PanelDark;
-        _padPanel.Paint += PadPanel_Paint;
-
-        Controls.Add(_padPanel);
-        Controls.Add(logPanel);
-        Controls.Add(top);
+            StyleButton(button, primary: false);
+        }
+        StyleButton(_startButton, primary: true);
+        BuildLayout();
 
         // ---------------------------------------------------------- eventos
         _startButton.Click += async (s, e) =>
@@ -192,11 +136,11 @@ public sealed class MainForm : Form
         {
             try
             {
-                Process.Start(new ProcessStartInfo("https://vigem.org/downloads/") { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo("https://github.com/nefarius/ViGEmBus/releases") { UseShellExecute = true });
             }
             catch
             {
-                AppendLog("No se pudo abrir el navegador. Descarga ViGEmBus desde https://vigem.org/downloads/");
+                AppendLog("No se pudo abrir el navegador. Descarga ViGEmBus desde https://github.com/nefarius/ViGEmBus/releases");
             }
         };
 
@@ -211,12 +155,10 @@ public sealed class MainForm : Form
         };
         _saveLogButton.Click += (s, e) => ExportLog();
 
-        _uiTimer.Tick += (s, e) =>
-        {
-            UpdateStats();
-            _padPanel.Invalidate();
-        };
+        _uiTimer.Tick += (_, _) => UpdateStats();
+        _previewTimer.Tick += (_, _) => _padPanel.UpdateFrame(_engine.LastFrame);
         _uiTimer.Start();
+        _previewTimer.Start();
 
         _engine.Log += m => PostToUi(() => AppendLog(m));
         _engine.StateChanged += () => PostToUi(UpdateUi);
@@ -226,9 +168,16 @@ public sealed class MainForm : Form
             if (_closeAllowed) return;
             e.Cancel = true;
             _uiTimer.Stop();
+            _previewTimer.Stop();
             await StopReceiverAsync();
             _closeAllowed = true;
             Close();
+        };
+
+        FormClosed += (_, _) =>
+        {
+            _uiTimer.Dispose();
+            _previewTimer.Dispose();
         };
 
         AppendLog($"Phantom Pad Receiver {AppVersion}. Empareja el teléfono con el PC y pulsa Iniciar.");
@@ -236,7 +185,7 @@ public sealed class MainForm : Form
         AppendLog(
             driver
                 ? "Driver ViGEmBus: detectado (OK)."
-                : "Driver ViGEmBus: NO detectado. Instálalo desde https://vigem.org/downloads/ y reinicia el PC.",
+                : "Driver ViGEmBus: NO detectado. Instálalo desde https://github.com/nefarius/ViGEmBus/releases y reinicia el PC.",
             driver ? LogSeverity.Ok : LogSeverity.Error
         );
         if (!driver)
@@ -244,19 +193,139 @@ public sealed class MainForm : Form
             _helpLink.LinkBehavior = LinkBehavior.HoverUnderline;
         }
         UpdateUi();
+        UpdateStats();
     }
 
     // ------------------------------------------------------------------- UI
 
-    private static void StyleButton(Button b)
+    private void BuildLayout()
     {
-        b.FlatStyle = FlatStyle.Flat;
-        b.FlatAppearance.BorderColor = AccentColor;
-        b.FlatAppearance.BorderSize = 1;
-        b.FlatAppearance.MouseOverBackColor = ControlHover;
-        b.BackColor = ControlOff;
-        b.ForeColor = Color.White;
-        b.Cursor = Cursors.Hand;
+        var app = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, Padding = new Padding(19, 11, 19, 14),
+            ColumnCount = 1, RowCount = 4
+        };
+        app.RowStyles.Add(new RowStyle(SizeType.Absolute, 75));
+        app.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        app.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        app.RowStyles.Add(new RowStyle(SizeType.Absolute, 162));
+
+        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+        var title = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        title.Controls.Add(Heading("Phantom Pad", 24f, new Point(0, 0)));
+        title.Controls.Add(new Label
+        {
+            Text = "Receptor para Windows  ·  " + AppVersion,
+            Location = new Point(3, 41), AutoSize = true, ForeColor = ReceiverTheme.Muted
+        });
+        heading.Controls.Add(title, 0, 0);
+        heading.Controls.Add(_pill, 1, 0);
+        app.Controls.Add(heading, 0, 0);
+
+        var toolbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty, Padding = new Padding(0, 2, 0, 0)
+        };
+        toolbar.Controls.Add(new Label
+        {
+            Text = "Modo", AutoSize = true, ForeColor = ReceiverTheme.Muted, Margin = new Padding(0, 10, 8, 0)
+        });
+        toolbar.Controls.AddRange([_modeCombo, _startButton, _stopButton, _testButton, _helpLink]);
+        app.Controls.Add(toolbar, 0, 1);
+
+        var dashboard = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
+        dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+        var gamepad = Section(new Padding(0, 0, 6, 8), "Mando en vivo");
+        gamepad.Controls.Add(_padPanel, 0, 1);
+        dashboard.Controls.Add(gamepad, 0, 0);
+
+        var diagnosis = Section(new Padding(6, 0, 0, 8), "Diagnóstico");
+        var stats = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
+        stats.RowStyles.Add(new RowStyle(SizeType.Absolute, 81));
+        stats.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var meters = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
+        for (int i = 0; i < 3; i++) meters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+        meters.Controls.Add(Metric("RTT", _rtt), 0, 0);
+        meters.Controls.Add(Metric("Entradas/s", _rate), 1, 0);
+        meters.Controls.Add(Metric("Failsafe", _failsafe), 2, 0);
+        stats.Controls.Add(meters, 0, 0);
+        stats.Controls.Add(_infoLabel, 0, 1);
+        diagnosis.Controls.Add(stats, 0, 1);
+        dashboard.Controls.Add(diagnosis, 1, 0);
+        app.Controls.Add(dashboard, 0, 2);
+
+        var log = Section(Padding.Empty);
+        var logBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        logBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        logBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var caption = Heading("Registro", 12f, Point.Empty);
+        caption.Anchor = AnchorStyles.Left;
+        logBar.Controls.Add(caption, 0, 0);
+        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        actions.Controls.AddRange([_clearLogButton, _copyLogButton, _saveLogButton]);
+        logBar.Controls.Add(actions, 1, 0);
+        log.Controls.Add(logBar, 0, 0);
+        var logBody = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 5, 8, 5), BackColor = ReceiverTheme.Background };
+        logBody.Controls.Add(_logBox);
+        log.Controls.Add(logBody, 0, 1);
+        app.Controls.Add(log, 0, 3);
+
+        Controls.Add(app);
+    }
+
+    private static TableLayoutPanel Section(Padding margin, string? name = null)
+    {
+        var section = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, BackColor = ReceiverTheme.Card, ColumnCount = 1,
+            RowCount = 2, Margin = margin, Padding = new Padding(12, 8, 12, 8)
+        };
+        section.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        section.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        if (name != null)
+        {
+            var heading = Heading(name, 12f, Point.Empty);
+            heading.Anchor = AnchorStyles.Left;
+            section.Controls.Add(heading, 0, 0);
+        }
+        return section;
+    }
+
+    private static Label Heading(string text, float points, Point location) => new()
+    {
+        Text = text, AutoSize = true, Font = new Font("Segoe UI Semibold", points),
+        ForeColor = ReceiverTheme.Text, Location = location
+    };
+
+    private static Control Metric(string title, Label value)
+    {
+        var card = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 6, 9), BackColor = ReceiverTheme.Raised };
+        var label = new Label { Text = title, ForeColor = ReceiverTheme.Muted, Location = new Point(9, 7), AutoSize = true };
+        value.ForeColor = ReceiverTheme.Text;
+        value.Font = new Font("Segoe UI Semibold", 15f);
+        value.Location = new Point(8, 27);
+        value.AutoSize = true;
+        card.Controls.AddRange([label, value]);
+        return card;
+    }
+
+    private static void StyleButton(Button button, bool primary)
+    {
+        button.Height = 33;
+        button.Margin = new Padding(0, 2, 7, 2);
+        button.FlatStyle = FlatStyle.Flat;
+        button.FlatAppearance.BorderColor = ReceiverTheme.Border;
+        button.FlatAppearance.BorderSize = 1;
+        button.FlatAppearance.MouseOverBackColor = primary ? Color.White : ReceiverTheme.Border;
+        button.BackColor = primary ? ReceiverTheme.Text : ReceiverTheme.Raised;
+        button.ForeColor = primary ? ReceiverTheme.Background : ReceiverTheme.Text;
+        button.UseVisualStyleBackColor = false;
+        button.Cursor = Cursors.Hand;
+        button.EnabledChanged += (_, _) => button.BackColor =
+            button.Enabled && primary ? ReceiverTheme.Text : ReceiverTheme.Raised;
     }
 
     private void UpdateUi()
@@ -330,7 +399,7 @@ public sealed class MainForm : Form
                 "Driver ViGEmBus: " + (VirtualController.DriverInstalled ? "instalado" : "NO instalado") + "\n" +
                 "Modo: " + _engine.Mode + "\n" +
                 new string('-', 60) + "\n";
-            File.WriteAllText(dialog.FileName, header + _infoLabel.Text + Environment.NewLine + _logBox.Text);
+            File.WriteAllText(dialog.FileName, header + _technicalDetails + Environment.NewLine + _logBox.Text);
             AppendLog("Registro guardado en " + dialog.FileName);
         }
         catch (Exception ex)
@@ -363,14 +432,31 @@ public sealed class MainForm : Form
         string index = stats.RawIndex < 0 ? "pendiente" : stats.RawIndex == 255 ? "sin asignar (255)" : stats.RawIndex.ToString();
         string age = stats.SessionId != 0 && stats.InputAgeMs is double last ? $"{last:F0} ms" : "—";
         string rtt = stats.SessionId != 0 && stats.RttMs is double rttMs ? $"{rttMs:F1} ms" : "—";
-        _infoLabel.Text =
-            $"BT {bt} · Sesiones activas {(stats.SessionId == 0 ? 0 : 1)} · Sesión #{stats.SessionId} · RTT RFCOMM {rtt}\n" +
-            $"Mando {stats.PadIdentity} · {padState} · ViGEmBus {(_driverInstalled ? "instalado" : "ausente al iniciar")}\n" +
-            $"Índice bruto {index} · {stats.XInput}\n" +
-            $"INPUT {stats.Inputs} ({fps:F0} fps) · Tramas válidas {stats.Frames} · {bytesPerSecond:F0} B/s · Último INPUT {age} · Failsafe {stats.Failsafes}\n" +
-            $"Lectura {stats.ReadBytes} B / {stats.ReadFrames} tramas · Pausa {stats.ReadGapMs:F1} ms · INPUT {stats.InputGapMs:F1} / máx {stats.MaximumInputGapMs:F1} ms · Proceso {stats.ProcessingMs:F1} ms\n" +
-            $"CRC {stats.CrcErrors} · Tipos desconocidos {stats.UnknownFrames} · Descartados {stats.DroppedBytes} B · Pendientes {stats.PendingBytes} B · Saltos {stats.MissingInputs} · Tardíos {stats.LateInputs}";
-        _infoLabel.ForeColor = stats.LinkDegraded || stats.Error != null ? WarnAmber : Color.Gainsboro;
+        _rtt.Text = rtt;
+        _rate.Text = sameSession ? $"{fps:F0}" : "—";
+        _failsafe.Text = stats.Failsafes.ToString();
+        _failsafe.ForeColor = stats.LinkDegraded ? ReceiverTheme.Warning : ReceiverTheme.Text;
+
+        // Actualizar sin perder la selección ni el scroll del usuario.
+        var details = string.Join(Environment.NewLine,
+            $"Bluetooth      {bt} · sesión #{stats.SessionId} ({(stats.SessionId == 0 ? 0 : 1)} activa)",
+            $"RTT RFCOMM     {rtt}",
+            $"ViGEmBus       {(_driverInstalled ? "instalado" : "ausente al iniciar")}",
+            $"Mando          {stats.PadIdentity}",
+            $"Estado         {padState}",
+            $"Índice bruto   {index}",
+            $"XInput         {stats.XInput}",
+            $"INPUT          {stats.Inputs} · {fps:F0}/s · {bytesPerSecond:F0} B/s",
+            $"Último INPUT   {age} · failsafe {stats.Failsafes}",
+            $"Tramas         {stats.Frames} · CRC {stats.CrcErrors} · desconocidas {stats.UnknownFrames}",
+            $"Lectura        {stats.ReadBytes} B / {stats.ReadFrames} tramas",
+            $"Pausa          {stats.ReadGapMs:F1} ms · proceso {stats.ProcessingMs:F1} ms",
+            $"Entre INPUT    {stats.InputGapMs:F1} / máx {stats.MaximumInputGapMs:F1} ms",
+            $"Parser         {stats.DroppedBytes} B descartados · {stats.PendingBytes} B pendientes",
+            $"Saltos INPUT   {stats.MissingInputs} · tardíos {stats.LateInputs}");
+        _technicalDetails = details;
+        if (_infoLabel.Text != details && !_infoLabel.Focused) _infoLabel.Text = details;
+        _infoLabel.ForeColor = stats.LinkDegraded || stats.Error != null ? ReceiverTheme.Warning : ReceiverTheme.Muted;
         // Muestra el error del servidor completo una sola vez (no en cada tick).
         if (_engine.ServerError != null && _engine.ServerError != _lastShownServerError)
         {
@@ -407,10 +493,10 @@ public sealed class MainForm : Form
     {
         Color color = severity switch
         {
-            LogSeverity.Ok => OkGreen,
-            LogSeverity.Warn => WarnAmber,
-            LogSeverity.Error => ErrRed,
-            _ => Color.Gainsboro
+            LogSeverity.Ok => ReceiverTheme.Success,
+            LogSeverity.Warn => ReceiverTheme.Warning,
+            LogSeverity.Error => ReceiverTheme.Error,
+            _ => ReceiverTheme.Text
         };
         _logBox.SelectionStart = _logBox.TextLength;
         _logBox.SelectionLength = 0;
@@ -422,165 +508,6 @@ public sealed class MainForm : Form
         _logBox.ScrollToCaret();
     }
 
-    // ------------------------------------------------------------- panel test
-
-    private void PadPanel_Paint(object? sender, PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
-        var f = _engine.LastFrame;
-        int w = _padPanel.ClientSize.Width;
-        int h = _padPanel.ClientSize.Height;
-        if (w < 50 || h < 50) return;
-
-        DrawFaceButtons(g, f, w, h);
-        DrawBumpers(g, f, w, h);
-        DrawTriggers(g, f, w, h);
-        DrawDpad(g, f, w, h);
-        DrawTouchpad(g, f, w, h);
-        DrawSticks(g, f, w, h);
-    }
-
-    private static void DrawCircleButton(Graphics g, float cx, float cy, float r, bool on, Color color, string? label = null)
-    {
-        using var fill = new SolidBrush(on ? color : ControlOff);
-        using var pen = new Pen(on ? color : Color.FromArgb(70, 70, 90), 2f);
-        g.FillEllipse(fill, cx - r, cy - r, r * 2, r * 2);
-        g.DrawEllipse(pen, cx - r, cy - r, r * 2, r * 2);
-        if (label != null)
-        {
-            using var text = new SolidBrush(on ? Color.White : Color.Silver);
-            using var font = new Font("Segoe UI", Math.Max(8f, r * 0.55f), FontStyle.Bold);
-            var size = g.MeasureString(label, font);
-            g.DrawString(label, font, text, cx - size.Width / 2, cy - size.Height / 2);
-        }
-    }
-
-    private void DrawFaceButtons(Graphics g, InputFrame f, int w, int h)
-    {
-        float r = Math.Min(w, h) * 0.038f;
-        foreach (var (button, label, fx, fy, color) in FaceButtons)
-        {
-            DrawCircleButton(g, w * fx, h * fy, r, f.Buttons.HasFlag(button), color, label);
-        }
-    }
-
-    private void DrawBumpers(Graphics g, InputFrame f, int w, int h)
-    {
-        float bw = w * 0.10f, bh = h * 0.055f;
-        DrawRounded(g, w * 0.16f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.L1), "L1");
-        DrawRounded(g, w * 0.84f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.R1), "R1");
-        DrawRounded(g, w * 0.44f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.Share), "SHARE");
-        DrawRounded(g, w * 0.56f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.Options), "OPTIONS");
-        DrawRounded(g, w * 0.50f - h * 0.03f, h * 0.19f, bw, bh, f.Buttons.HasFlag(PadButtons.Ps), "PS");
-    }
-
-    private static void DrawRounded(Graphics g, float x, float y, float w, float h, bool on, string label)
-    {
-        var rect = new RectangleF(x, y, w, h);
-        using var path = new System.Drawing.Drawing2D.GraphicsPath();
-        float radius = h / 2;
-        path.AddArc(x, y, radius, radius, 180, 90);
-        path.AddArc(x + w - radius, y, radius, radius, 270, 90);
-        path.AddArc(x + w - radius, y + h - radius, radius, radius, 0, 90);
-        path.AddArc(x, y + h - radius, radius, radius, 90, 90);
-        path.CloseFigure();
-
-        using var fill = new SolidBrush(on ? AccentColor : ControlOff);
-        using var pen = new Pen(on ? AccentColor : Color.FromArgb(70, 70, 90), 2f);
-        g.FillPath(fill, path);
-        g.DrawPath(pen, path);
-        using var text = new SolidBrush(on ? Color.White : Color.Silver);
-        using var font = new Font("Segoe UI", Math.Max(7f, h * 0.34f), FontStyle.Bold);
-        var size = g.MeasureString(label, font);
-        g.DrawString(label, font, text, x + w / 2 - size.Width / 2, y + h / 2 - size.Height / 2);
-    }
-
-    private void DrawTriggers(Graphics g, InputFrame f, int w, int h)
-    {
-        float bw = w * 0.035f, bh = h * 0.20f;
-        DrawTriggerBar(g, w * 0.07f, h * 0.08f, bw, bh, f.L2, "L2");
-        DrawTriggerBar(g, w * 0.93f, h * 0.08f, bw, bh, f.R2, "R2");
-    }
-
-    private static void DrawTriggerBar(Graphics g, float cx, float yTop, float bw, float bh, byte value, string label)
-    {
-        var rect = new RectangleF(cx - bw / 2, yTop, bw, bh);
-        using var back = new SolidBrush(ControlOff);
-        using var pen = new Pen(Color.FromArgb(70, 70, 90), 2f);
-        g.FillRectangle(back, rect);
-        float fillH = bh * value / 255f;
-        if (fillH > 1)
-        {
-            using var fill = new SolidBrush(AccentColor);
-            g.FillRectangle(fill, cx - bw / 2, yTop + bh - fillH, bw, fillH);
-        }
-        g.DrawRectangle(pen, cx - bw / 2, yTop, bw, bh);
-        using var text = new SolidBrush(Color.Silver);
-        using var font = new Font("Segoe UI", 9f, FontStyle.Bold);
-        g.DrawString(label, font, text, cx - 12, yTop + bh + 2);
-    }
-
-    private void DrawDpad(Graphics g, InputFrame f, int w, int h)
-    {
-        float cx = w * 0.30f, cy = h * 0.62f;
-        float arm = Math.Min(w, h) * 0.055f;
-        float th = arm * 0.62f;
-
-        DrawRect(g, cx - th / 2, cy - arm - th / 2, th, arm, f.Buttons.HasFlag(PadButtons.DpadUp));
-        DrawRect(g, cx - th / 2, cy + th / 2, th, arm, f.Buttons.HasFlag(PadButtons.DpadDown));
-        DrawRect(g, cx - arm - th / 2, cy - th / 2, arm, th, f.Buttons.HasFlag(PadButtons.DpadLeft));
-        DrawRect(g, cx + th / 2, cy - th / 2, arm, th, f.Buttons.HasFlag(PadButtons.DpadRight));
-        DrawCircleButton(g, cx, cy, th * 0.35f, false, ControlOff);
-    }
-
-    private static void DrawRect(Graphics g, float x, float y, float w, float h, bool on)
-    {
-        using var fill = new SolidBrush(on ? AccentColor : ControlOff);
-        g.FillRectangle(fill, x, y, w, h);
-    }
-
-    private void DrawTouchpad(Graphics g, InputFrame f, int w, int h)
-    {
-        float x = w * 0.42f, y = h * 0.27f, tw = w * 0.16f, th = h * 0.12f;
-        bool on = f.Buttons.HasFlag(PadButtons.Touchpad);
-        using var fill = new SolidBrush(on ? Color.FromArgb(90, 80, 140) : Color.FromArgb(28, 28, 40));
-        using var pen = new Pen(on ? AccentColor : Color.FromArgb(70, 70, 90), 2f);
-        g.FillRectangle(fill, x, y, tw, th);
-        g.DrawRectangle(pen, x, y, tw, th);
-        using var text = new SolidBrush(Color.Silver);
-        using var font = new Font("Segoe UI", 9f);
-        g.DrawString("TOUCHPAD", font, text, x + tw / 2 - 34, y + th / 2 - 8);
-    }
-
-    private void DrawSticks(Graphics g, InputFrame f, int w, int h)
-    {
-        float r = Math.Min(w, h) * 0.075f;
-        DrawStick(g, w * 0.30f, h * 0.82f, r, f.LX, f.LY, "L");
-        DrawStick(g, w * 0.70f, h * 0.82f, r, f.RX, f.RY, "R");
-    }
-
-    private static void DrawStick(Graphics g, float cx, float cy, float r, sbyte x, sbyte y, string label)
-    {
-        using var ring = new Pen(Color.FromArgb(70, 70, 90), 2f);
-        using var ringFill = new SolidBrush(Color.FromArgb(24, 24, 34));
-        g.FillEllipse(ringFill, cx - r, cy - r, r * 2, r * 2);
-        g.DrawEllipse(ring, cx - r, cy - r, r * 2, r * 2);
-
-        float dx = x / 127f * r * 0.55f;
-        float dy = -y / 127f * r * 0.55f; // invertir para que "arriba" se vea arriba
-        float dotR = r * 0.38f;
-        using var dot = new SolidBrush(AccentColor);
-        g.FillEllipse(dot, cx + dx - dotR, cy + dy - dotR, dotR * 2, dotR * 2);
-
-        using var text = new SolidBrush(Color.Silver);
-        using var font = new Font("Segoe UI", 10f, FontStyle.Bold);
-        g.DrawString(label, font, text, cx - 6, cy - r - 20);
-    }
-
-    /// <summary>Píldora de estado: punto de color + texto, estilo Phantom.</summary>
     private sealed class StatusPill : Control
     {
         public enum State { Idle, Waiting, Connected, Error }
@@ -588,16 +515,11 @@ public sealed class MainForm : Form
         private State _state = State.Idle;
         private string _text = "Detenido";
 
-        private static readonly Color IdleColor = Color.Silver;
-        private static readonly Color WaitingColor = Color.FromArgb(255, 183, 77);
-        private static readonly Color ConnectedColor = Color.FromArgb(76, 175, 80);
-        private static readonly Color ErrorColor = Color.FromArgb(239, 83, 80);
-        private static readonly Color PillBack = Color.FromArgb(22, 22, 32);
-
         public StatusPill()
         {
             DoubleBuffered = true;
             ResizeRedraw = true;
+            AccessibleName = _text;
         }
 
         public void SetStatus(State state, string text)
@@ -605,48 +527,32 @@ public sealed class MainForm : Form
             if (_state == state && _text == text) return;
             _state = state;
             _text = text;
+            AccessibleName = text;
             Invalidate();
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-
             var color = _state switch
             {
-                State.Connected => ConnectedColor,
-                State.Waiting => WaitingColor,
-                State.Error => ErrorColor,
-                _ => IdleColor
+                State.Connected => ReceiverTheme.Success,
+                State.Waiting => ReceiverTheme.Warning,
+                State.Error => ReceiverTheme.Error,
+                _ => ReceiverTheme.Muted
             };
-
-            using var back = new SolidBrush(PillBack);
-            using var path = new System.Drawing.Drawing2D.GraphicsPath();
-            int radius = Height / 2;
-            path.AddArc(0, 0, radius, radius, 180, 90);
-            path.AddArc(Width - radius, 0, radius, radius, 270, 90);
-            path.AddArc(Width - radius, Height - radius, radius, radius, 0, 90);
-            path.AddArc(0, Height - radius, radius, radius, 90, 90);
-            path.CloseFigure();
-            g.FillPath(back, path);
-            using var border = new Pen(Color.FromArgb(50, 50, 70), 1f);
-            g.DrawPath(border, path);
-
-            // punto con halo
-            float dotX = 22, dotY = Height / 2f, dotR = 6;
-            using (var halo = new SolidBrush(Color.FromArgb(40, color)))
-            {
-                g.FillEllipse(halo, dotX - dotR - 4, dotY - dotR - 4, (dotR + 4) * 2, (dotR + 4) * 2);
-            }
+            var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+            if (rect.Width < 10 || rect.Height < 10) return;
+            var graphics = e.Graphics;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var path = ReceiverTheme.Rounded(rect, 12);
+            using var back = new SolidBrush(ReceiverTheme.Card);
+            using var border = new Pen(ReceiverTheme.Border);
             using var dot = new SolidBrush(color);
-            g.FillEllipse(dot, dotX - dotR, dotY - dotR, dotR * 2, dotR * 2);
-
-            using var text = new SolidBrush(color);
-            using var font = new Font("Segoe UI", 11f, FontStyle.Bold);
-            var size = g.MeasureString(_text, font);
-            g.DrawString(_text, font, text, dotX + dotR + 10, dotY - size.Height / 2);
+            graphics.FillPath(back, path);
+            graphics.DrawPath(border, path);
+            graphics.FillEllipse(dot, 14, rect.Height / 2f - 4, 8, 8);
+            TextRenderer.DrawText(graphics, _text, Font, new Rectangle(30, 0, Math.Max(1, Width - 40), Height),
+                color, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
     }
 }

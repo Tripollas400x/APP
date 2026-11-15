@@ -11,7 +11,7 @@
 | Interfaz PC | C# / .NET 8 (WinForms) |
 | Emulación PC | ViGEmBus (Xbox 360 / DualShock 4) |
 
-## Estado del proyecto (v0.2.2)
+## Estado del proyecto (v0.3.0)
 
 Este proyecto se mantiene honesto: nada de funciones simuladas ni promesas sin medir.
 
@@ -78,10 +78,17 @@ Frame de 30 bytes: cabecera `0x50 0x50 0x01`, tipo, secuencia, máscara de 16 bo
 
 ## Personalización
 
-- **PlayStation Classic**: distribución tradicional.
-- **FPS Pro**: sticks altos, acción y cruceta abajo.
-- **Racing**: sticks interiores y gatillos grandes.
-- **Custom**: editor con arrastre, escala y opacidad por control. Todo se guarda localmente (DataStore), sin internet.
+- **PlayStation Classic** reúne la cruceta y los botones de acción en los extremos, con los dos sticks hacia el centro.
+- **FPS Pro** deja los sticks más arriba y los botones de acción más cerca del espacio central.
+- **Racing** aumenta el área de los gatillos y el tamaño de los sticks.
+- En el **editor** puedes tocar o arrastrar cualquier control, ajustar tamaño y opacidad y pulsar **Guardar**. Las distribuciones personalizadas de v0.2.x conservan sus medidas. **Restablecer** carga la distribución predeterminada de v0.3 para ese perfil.
+
+### Comprobar el rediseño
+
+1. Empareja el teléfono y abre Phantom Pad Receiver en Windows. Antes de conectar el celular, pulsa **Prueba local** y verifica el barrido en `joy.cpl`.
+2. Conecta por **Receptor Windows** y prueba sticks, gatillos, botones simultáneos, diagonales y L3/R3.
+3. Abre el editor, mueve un control y guarda. Vuelve al mando y comprueba la posición. Cambia de perfil desde Ajustes para comparar las tres distribuciones.
+4. Desliza desde el borde en modo mando para mostrar temporalmente las barras de Android. Al salir del mando, las barras vuelven.
 
 ## Latencia
 
