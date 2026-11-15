@@ -150,7 +150,7 @@ class RfcommTransport(
      */
     private fun stopDiscoveryAndWait() {
         val discovering = try {
-            bt.isDiscovering
+            bt.isDiscovering()
         } catch (_: SecurityException) {
             false
         }
@@ -159,7 +159,7 @@ class RfcommTransport(
         bt.stopScan()
         val deadline = SystemClock.elapsedRealtime() + 2_000
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (!bt.isDiscovering) {
+            if (!bt.isDiscovering()) {
                 log.add("RFCOMM: descubrimiento detenido.")
                 return
             }
