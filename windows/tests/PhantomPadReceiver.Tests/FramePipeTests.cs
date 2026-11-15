@@ -27,6 +27,24 @@ public class FramePipeTests
     }
 
     [Fact]
+    public void Deleted_input_byte_does_not_consume_the_next_frame_header()
+    {
+        var pipe = new FramePipe();
+        var truncated = SampleInput(10)[..^1];
+        var good = SampleInput(11);
+        pipe.Append(truncated);
+        Assert.False(pipe.TryReadFrame(out _, out _));
+        Assert.Equal(truncated.Length, pipe.PendingBytes);
+
+        pipe.Append(good);
+        Assert.True(pipe.TryReadFrame(out var frame, out _));
+        Assert.Equal(11, PhantomProtocol.ReadSeq(frame));
+        Assert.Equal(1, pipe.RejectedFrames);
+        Assert.Equal(truncated.Length, pipe.DroppedBytes);
+        Assert.Equal(0, pipe.PendingBytes);
+    }
+
+    [Fact]
     public void Single_frame_in_one_read()
     {
         var pipe = new FramePipe();
@@ -34,6 +52,7 @@ public class FramePipeTests
         Assert.True(pipe.TryReadFrame(out var frame, out var type));
         Assert.Equal(FrameType.Pong, type);
         Assert.Equal(0x55, PhantomProtocol.ReadSeq(frame));
+        Assert.Equal(0, pipe.DroppedBytes);
         Assert.False(pipe.TryReadFrame(out _, out _));
     }
 
@@ -112,6 +131,7 @@ public class FramePipeTests
         Assert.True(pipe.TryReadFrame(out var frame, out var type));
         Assert.Equal(FrameType.Pong, type);
         Assert.Equal(0x21, PhantomProtocol.ReadSeq(frame));
+        Assert.Equal(1, pipe.UnknownFrames);
     }
 
     [Fact]

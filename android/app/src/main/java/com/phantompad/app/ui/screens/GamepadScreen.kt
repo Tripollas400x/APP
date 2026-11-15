@@ -131,8 +131,8 @@ fun GamepadScreen(
                     color = TextPrimary
                 )
                 if (settings.transportMode == com.phantompad.app.data.TransportModeWire.RECEIVER) {
-                    latency.avgMs?.let {
-                        Text("%.0f ms".format(it), style = MaterialTheme.typography.labelSmall, color = Accent)
+                    latency.lastMs?.let {
+                        Text("RTT %.0f ms".format(it), style = MaterialTheme.typography.labelSmall, color = Accent)
                     }
                 }
                 battery?.let {

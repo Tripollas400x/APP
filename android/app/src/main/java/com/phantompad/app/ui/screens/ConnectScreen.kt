@@ -179,6 +179,7 @@ fun ConnectScreen(
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Accent)
                     Spacer(Modifier.width(8.dp))
                     Text("Conectando...", color = WarnAmber, style = MaterialTheme.typography.labelSmall)
+                    androidx.compose.material3.TextButton(onClick = vm::disconnect) { Text("Cancelar") }
                 }
                 TransportState.CONNECTED -> StatusLine(
                     OkGreen,

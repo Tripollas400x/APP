@@ -122,6 +122,8 @@ public static class PhantomProtocol
     public static ushort ReadSeq(ReadOnlySpan<byte> frame) =>
         (ushort)(frame[4] | (frame[5] << 8));
 
+    public static byte[] BuildPing(ushort seq) => ShortFrame(FrameType.Ping, seq);
+
     public static byte[] BuildPong(ushort seq) => ShortFrame(FrameType.Pong, seq);
 
     public static byte[] BuildRumble(byte small, byte large)
@@ -192,11 +194,12 @@ public sealed class FramePipe
 
     /// <summary>Bytes pendientes de procesar dentro del pipe.</summary>
     public int PendingBytes => _length;
+    public int UnknownFrames { get; private set; }
 
     public void Append(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty) return;
-        // Drop() mantiene siempre los bytes pendientes al inicio del buffer,
+        // Consume() mantiene siempre los bytes pendientes al inicio del buffer,
         // así que basta con crecer si lo nuevo no cabe.
         if (_length + data.Length > _buffer.Length)
         {
@@ -222,14 +225,15 @@ public sealed class FramePipe
             if (_buffer[0] != PhantomProtocol.Magic0 || _buffer[1] != PhantomProtocol.Magic1 ||
                 _buffer[2] != PhantomProtocol.Version)
             {
-                Drop(1); // basura delante: resincronizar byte a byte
+                Consume(1, discarded: true); // basura delante: resincronizar byte a byte
                 continue;
             }
 
             int expected = PhantomProtocol.LengthOfType(_buffer[3]);
             if (expected == 0)
             {
-                Drop(1); // tipo desconocido: no se sabe su longitud, resincronizar
+                UnknownFrames++;
+                Consume(1, discarded: true); // tipo desconocido: no se sabe su longitud, resincronizar
                 continue;
             }
             if (_length < expected) return false; // frame a medias: esperar más bytes
@@ -237,20 +241,20 @@ public sealed class FramePipe
             if (PhantomProtocol.Crc8(_buffer.AsSpan(0, expected - 1)) != _buffer[expected - 1])
             {
                 RejectedFrames++;
-                Drop(expected); // frame corrupto completo fuera
+                Consume(1, discarded: true); // Recuperar incluso si falta un byte del frame.
                 continue;
             }
 
             frame = _buffer.AsSpan(0, expected).ToArray();
             type = (FrameType)_buffer[3];
-            Drop(expected);
+            Consume(expected);
             return true;
         }
     }
 
-    private void Drop(int count)
+    private void Consume(int count, bool discarded = false)
     {
-        DroppedBytes += count;
+        if (discarded) DroppedBytes += count;
         _buffer.AsSpan(count, _length - count).CopyTo(_buffer);
         _length -= count;
     }

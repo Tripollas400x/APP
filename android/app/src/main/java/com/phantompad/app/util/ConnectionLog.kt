@@ -19,9 +19,8 @@ class ConnectionLog {
     val entries: StateFlow<List<String>> = _entries
 
     fun add(message: String) {
-        val line = "${format.format(Date())}  $message"
         synchronized(lines) {
-            lines.addLast(line)
+            lines.addLast("${format.format(Date())}  $message")
             while (lines.size > MAX_LINES) lines.removeFirst()
             _entries.value = lines.toList()
         }

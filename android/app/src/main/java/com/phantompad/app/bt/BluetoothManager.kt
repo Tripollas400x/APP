@@ -141,8 +141,7 @@ class BluetoothManager(
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_EXPORTED
         )
-        _enabled.value = adapter?.isEnabled == true
-        refreshBonded()
+        refreshAdapter()
     }
 
     // ---------------------------------------------------------------- permisos
@@ -163,6 +162,11 @@ class BluetoothManager(
     }
 
     // ------------------------------------------------------------- dispositivos
+
+    fun refreshAdapter() {
+        _enabled.value = runCatching { adapter?.isEnabled == true }.getOrDefault(false)
+        refreshBonded()
+    }
 
     fun refreshBonded() {
         val bonded = try {
@@ -253,26 +257,25 @@ class BluetoothManager(
             bondRegistered = true
         }
         bondAddress = device.address
-        val result = withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine { cont ->
-                bondContinuation = cont
-                val started = try {
-                    device.createBond()
-                } catch (e: Exception) {
-                    log.add("createBond falló: ${e.message}")
-                    false
+        return try {
+            withTimeoutOrNull(timeoutMs) {
+                suspendCancellableCoroutine { cont ->
+                    bondContinuation = cont
+                    val started = try {
+                        device.createBond()
+                    } catch (e: Exception) {
+                        log.add("createBond falló: ${e.message}")
+                        false
+                    }
+                    if (!started) resumeBond(false)
                 }
-                if (!started) {
-                    bondContinuation = null
-                    cont.resume(false)
-                }
-            }
-        } ?: false
-        runCatching { context.unregisterReceiver(bondReceiver) }
-        bondRegistered = false
-        bondAddress = null
-        bondContinuation = null
-        return result
+            } ?: false
+        } finally {
+            if (bondRegistered) runCatching { context.unregisterReceiver(bondReceiver) }
+            bondRegistered = false
+            bondAddress = null
+            bondContinuation = null
+        }
     }
 
     fun dispose() {

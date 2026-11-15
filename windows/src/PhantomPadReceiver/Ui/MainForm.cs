@@ -13,7 +13,7 @@ namespace PhantomPadReceiver.Ui;
 /// </summary>
 public sealed class MainForm : Form
 {
-    private const string AppVersion = "v0.2.1";
+    private const string AppVersion = "v0.2.2";
 
     private readonly ReceiverEngine _engine = new();
 
@@ -46,8 +46,11 @@ public sealed class MainForm : Form
     private readonly StatusPill _pill = new() { Width = 340, Height = 40 };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
 
-    private long _lastFrames;
-    private DateTime _lastFpsAt = DateTime.UtcNow;
+    private ReceiverDiagnostics _lastStats;
+    private long _lastFpsAt = Stopwatch.GetTimestamp();
+    private bool _stopping;
+    private bool _closeAllowed;
+    private readonly bool _driverInstalled = VirtualController.DriverInstalled;
     private string? _lastShownServerError;
 
     private static readonly Color AccentColor = Color.FromArgb(158, 123, 255);
@@ -80,7 +83,7 @@ public sealed class MainForm : Form
         _modeCombo.DataSource = Enum.GetValues<PadMode>();
 
         // ---------------------------------------------------------- cabecera
-        var top = new Panel { Dock = DockStyle.Top, Height = 186, BackColor = HeaderDark };
+        var top = new Panel { Dock = DockStyle.Top, Height = 273, BackColor = HeaderDark };
 
         var title = new Label
         {
@@ -148,9 +151,9 @@ public sealed class MainForm : Form
         _padPanel.BackColor = PanelDark;
         _padPanel.Paint += PadPanel_Paint;
 
-        Controls.Add(top);
-        Controls.Add(logPanel);
         Controls.Add(_padPanel);
+        Controls.Add(logPanel);
+        Controls.Add(top);
 
         // ---------------------------------------------------------- eventos
         _startButton.Click += async (s, e) =>
@@ -168,11 +171,7 @@ public sealed class MainForm : Form
             UpdateUi();
         };
 
-        _stopButton.Click += (s, e) =>
-        {
-            _engine.StopAll();
-            UpdateUi();
-        };
+        _stopButton.Click += async (s, e) => await StopReceiverAsync();
 
         // Test A (sin teléfono): barrido por el mando virtual para joy.cpl.
         _testButton.Click += async (s, e) =>
@@ -219,17 +218,21 @@ public sealed class MainForm : Form
         };
         _uiTimer.Start();
 
-        _engine.Log += m => BeginInvoke(new Action(() => AppendLog(m)));
-        _engine.StateChanged += () => BeginInvoke(new Action(UpdateUi));
+        _engine.Log += m => PostToUi(() => AppendLog(m));
+        _engine.StateChanged += () => PostToUi(UpdateUi);
 
-        FormClosing += (s, e) =>
+        FormClosing += async (s, e) =>
         {
+            if (_closeAllowed) return;
+            e.Cancel = true;
             _uiTimer.Stop();
-            _engine.Dispose();
+            await StopReceiverAsync();
+            _closeAllowed = true;
+            Close();
         };
 
         AppendLog($"Phantom Pad Receiver {AppVersion}. Empareja el teléfono con el PC y pulsa Iniciar.");
-        bool driver = VirtualController.DriverInstalled;
+        bool driver = _driverInstalled;
         AppendLog(
             driver
                 ? "Driver ViGEmBus: detectado (OK)."
@@ -279,14 +282,35 @@ public sealed class MainForm : Form
         }
         else
         {
-            _pill.SetStatus(StatusPill.State.Idle, "Detenido");
+            _pill.SetStatus(_engine.Running ? StatusPill.State.Waiting : StatusPill.State.Idle,
+                _engine.Running ? "Publicando RFCOMM…" : "Detenido");
         }
 
-        var busy = advertising;
+        var busy = _engine.Running || _stopping;
         _startButton.Enabled = !busy;
-        _stopButton.Enabled = busy;
+        _stopButton.Enabled = _engine.Running && !_stopping;
         _modeCombo.Enabled = !busy;
-        _testButton.Enabled = _engine.VigemReady && !_engine.LocalTestRunning;
+        _testButton.Enabled = !_stopping && _engine.CanTest;
+    }
+
+    private async Task StopReceiverAsync()
+    {
+        _stopping = true;
+        UpdateUi();
+        try { await _engine.StopAsync(); }
+        catch (Exception ex) { AppendLog("ERROR al detener: " + RfcommServer.Detail(ex)); }
+        finally
+        {
+            _stopping = false;
+            UpdateUi();
+        }
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (!IsHandleCreated || IsDisposed || _closeAllowed) return;
+        try { BeginInvoke(action); }
+        catch (InvalidOperationException) { }
     }
 
     /// <summary>Exporta el registro a un .log sin datos privados (solo eventos).</summary>
@@ -306,7 +330,7 @@ public sealed class MainForm : Form
                 "Driver ViGEmBus: " + (VirtualController.DriverInstalled ? "instalado" : "NO instalado") + "\n" +
                 "Modo: " + _engine.Mode + "\n" +
                 new string('-', 60) + "\n";
-            File.WriteAllText(dialog.FileName, header + _logBox.Text);
+            File.WriteAllText(dialog.FileName, header + _infoLabel.Text + Environment.NewLine + _logBox.Text);
             AppendLog("Registro guardado en " + dialog.FileName);
         }
         catch (Exception ex)
@@ -317,41 +341,36 @@ public sealed class MainForm : Form
 
     private void UpdateStats()
     {
-        var now = DateTime.UtcNow;
-        var dt = (now - _lastFpsAt).TotalSeconds;
-        var fps = dt > 0.05 ? (_engine.TotalFrames - _lastFrames) / dt : 0.0;
-        _lastFrames = _engine.TotalFrames;
+        var now = Stopwatch.GetTimestamp();
+        var stats = _engine.Diagnostics;
+        var dt = Stopwatch.GetElapsedTime(_lastFpsAt, now).TotalSeconds;
+        bool sameSession = stats.SessionId != 0 && _lastStats.SessionId == stats.SessionId && dt > 0;
+        double fps = sameSession ? (stats.Inputs - _lastStats.Inputs) / dt : 0;
+        double bytesPerSecond = sameSession ? (stats.Bytes - _lastStats.Bytes) / dt : 0;
+        _lastStats = stats;
         _lastFpsAt = now;
 
-        string pad;
-        if (!_engine.VigemReady)
+        string padState = stats.PadState switch
         {
-            pad = _engine.PadError != null ? "no listo (reintentando…)" : "no iniciado";
-        }
-        else if (_engine.PadFellBack)
-        {
-            pad = "DualShock 4 (fallback)";
-        }
-        else if (_engine.PadIndexPending)
-        {
-            pad = "Xbox360 (índice pendiente, operativo)";
-        }
-        else if (_engine.VirtualPadIndex >= 0)
-        {
-            pad = $"Xbox360 #{_engine.VirtualPadIndex}";
-        }
-        else
-        {
-            pad = "DualShock 4";
-        }
-
-        string driver = VirtualController.DriverInstalled ? "OK" : "NO instalado";
-        string server = _engine.ServerError != null ? "ERROR" : (_engine.Advertising ? "publicado" : "detenido");
+            ControllerState.InputReady => "entrada comprobada",
+            ControllerState.BusConnected => "registrado, pendiente de comprobar entrada",
+            ControllerState.WindowsEnumerating => "índice pendiente / enumerando",
+            ControllerState.Degraded => "degradado",
+            ControllerState.Failed => "error, reintentando",
+            _ => _engine.Running ? "iniciando" : "detenido"
+        };
+        string bt = _engine.ServerError != null ? "ERROR" : _engine.Advertising ? "publicado" : "detenido";
+        string index = stats.RawIndex < 0 ? "pendiente" : stats.RawIndex == 255 ? "sin asignar (255)" : stats.RawIndex.ToString();
+        string age = stats.SessionId != 0 && stats.InputAgeMs is double last ? $"{last:F0} ms" : "—";
+        string rtt = stats.SessionId != 0 && stats.RttMs is double rttMs ? $"{rttMs:F1} ms" : "—";
         _infoLabel.Text =
-            $"Mando: {pad}    ViGEmBus: {driver}    BT: {server}    Teléfono: {_engine.PhoneName}    " +
-            $"Frames: {_engine.TotalFrames} ({fps:F0} fps)    Rechazados: {_engine.RejectedFrames}    " +
-            $"Failsafe: {_engine.FailsafeEvents}";
-        _infoLabel.ForeColor = _engine.VigemReady && _engine.ServerError == null ? Color.Gainsboro : WarnAmber;
+            $"BT {bt} · Sesiones activas {(stats.SessionId == 0 ? 0 : 1)} · Sesión #{stats.SessionId} · RTT RFCOMM {rtt}\n" +
+            $"Mando {stats.PadIdentity} · {padState} · ViGEmBus {(_driverInstalled ? "instalado" : "ausente al iniciar")}\n" +
+            $"Índice bruto {index} · {stats.XInput}\n" +
+            $"INPUT {stats.Inputs} ({fps:F0} fps) · Tramas válidas {stats.Frames} · {bytesPerSecond:F0} B/s · Último INPUT {age} · Failsafe {stats.Failsafes}\n" +
+            $"Lectura {stats.ReadBytes} B / {stats.ReadFrames} tramas · Pausa {stats.ReadGapMs:F1} ms · INPUT {stats.InputGapMs:F1} / máx {stats.MaximumInputGapMs:F1} ms · Proceso {stats.ProcessingMs:F1} ms\n" +
+            $"CRC {stats.CrcErrors} · Tipos desconocidos {stats.UnknownFrames} · Descartados {stats.DroppedBytes} B · Pendientes {stats.PendingBytes} B · Saltos {stats.MissingInputs} · Tardíos {stats.LateInputs}";
+        _infoLabel.ForeColor = stats.LinkDegraded || stats.Error != null ? WarnAmber : Color.Gainsboro;
         // Muestra el error del servidor completo una sola vez (no en cada tick).
         if (_engine.ServerError != null && _engine.ServerError != _lastShownServerError)
         {

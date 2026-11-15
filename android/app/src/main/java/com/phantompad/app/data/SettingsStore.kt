@@ -32,7 +32,7 @@ enum class ProfileId(val title: String) {
  */
 @Serializable
 data class AppSettings(
-    val sendRateHz: Int = 120,               // 30..240
+    val sendRateHz: Int = 60,               // 30..240
     val deadzone: Float = 0.08f,             // 0..0.30
     val sensitivity: Float = 1.0f,           // 0.6..1.6
     val gyroEnabled: Boolean = false,

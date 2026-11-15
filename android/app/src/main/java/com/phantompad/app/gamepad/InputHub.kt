@@ -2,17 +2,17 @@ package com.phantompad.app.gamepad
 
 import com.phantompad.app.data.AppSettings
 import com.phantompad.app.sensors.GyroController
+import com.phantompad.app.protocol.InputSnapshot
 import com.phantompad.app.transport.Transport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Bucle de envío: codifica el estado del mando y lo manda a la frecuencia
@@ -41,8 +41,10 @@ class InputHub(
 
     val isRunning: Boolean get() = job?.isActive == true
 
+    @Volatile var controlsActive = false
+
     fun start(transport: Transport) {
-        stop()
+        if (isRunning) return
         job = scope.launch(Dispatchers.Default) {
             runLoop(transport)
         }
@@ -53,18 +55,27 @@ class InputHub(
         job = null
     }
 
+    suspend fun stopAndJoin() {
+        job?.cancelAndJoin()
+        job = null
+    }
+
     private suspend fun runLoop(transport: Transport) {
-        var seq = 0
         var nextDeadline = System.nanoTime()
         try {
             while (kotlin.coroutines.coroutineContext.isActive) {
                 val s = settings.value
-                val targetRate = if (s.energySaver) minOf(s.sendRateHz, 60) else s.sendRateHz
+                val active = controlsActive
+                val targetRate = when {
+                    !active -> 30
+                    s.energySaver -> minOf(s.sendRateHz, 60)
+                    else -> s.sendRateHz
+                }
                 val rate = targetRate.coerceIn(30, 240)
                 val intervalNs = 1_000_000_000L / rate
 
-                var snapshot = state.snapshot()
-                if (s.gyroEnabled && gyro.available) {
+                var snapshot = if (active) state.snapshot() else InputSnapshot()
+                if (active && s.gyroEnabled && gyro.available) {
                     snapshot = snapshot.withGyro(gyro.latestCopy())
                 }
 
@@ -77,34 +88,14 @@ class InputHub(
 
                 nextDeadline += intervalNs
                 val now = System.nanoTime()
-                val remainingMs = (nextDeadline - now) / 1_000_000
-                if (remainingMs > 0) {
-                    delay(remainingMs)
-                } else {
-                    // No llegamos a la frecuencia objetivo: reiniciar el planificador.
-                    nextDeadline = now
-                }
+                // Saltar ranuras atrasadas en lugar de generar una ráfaga de informes.
+                if (nextDeadline <= now) nextDeadline = now + intervalNs
+                delay((nextDeadline - now + 999_999) / 1_000_000)
             }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
             transport.onSendFailure(e)
-        } finally {
-            // La cancelación de la coroutine también cancela las llamadas
-            // suspend normales del finally: con NonCancellable garantizamos que
-            // RELEASE_ALL sale aunque el bucle se esté cancelando; si el enlace
-            // ya está muerto, el failsafe del receptor libera por su lado.
-            withContext(NonCancellable) {
-                transport.safeReleaseAll()
-            }
-        }
-    }
-
-    private suspend fun Transport.safeReleaseAll() {
-        try {
-            releaseAll()
-        } catch (_: Exception) {
-            // liberar nunca debe propagar errores al cancelarse
         }
     }
 }
