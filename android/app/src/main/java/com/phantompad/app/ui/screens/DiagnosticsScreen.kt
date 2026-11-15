@@ -122,6 +122,7 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
                     InfoRow("Mínimo", formatMs(latencyStats.minMs))
                     InfoRow("Máximo", formatMs(latencyStats.maxMs))
                     InfoRow("Muestras", latencyStats.samples.toString())
+                    InfoRow("PONG expirados", latencyStats.lost.toString())
                 }
             }
             item {

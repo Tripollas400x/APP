@@ -14,17 +14,14 @@ import com.phantompad.app.protocol.ButtonId
 import com.phantompad.app.protocol.InputSnapshot
 import com.phantompad.app.protocol.PhantomProtocol
 import com.phantompad.app.util.ConnectionLog
-import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.util.concurrent.Executor
-import kotlin.coroutines.resume
 
 /**
  * Método A: registro HID directo con BluetoothHidDevice (Android 9+).
@@ -49,359 +46,215 @@ class HidTransport(
     private val log: ConnectionLog
 ) : BaseTransport() {
 
-    private var hid: BluetoothHidDevice? = null
+    @Volatile private var hid: BluetoothHidDevice? = null
+    @Volatile private var device: BluetoothDevice? = null
     private var adapter: BluetoothAdapter? = null
-    private var device: BluetoothDevice? = null
-
-    @Volatile
-    private var registered = false
-
-    @Volatile
-    private var plugged = false
-
-    @Volatile
-    private var connectConfirmed = false
-
-    /** Host esperado durante connect(target); null en supervisión pasiva. */
-    @Volatile
     private var expectedAddress: String? = null
-
-    private var continuation: CancellableContinuation<Boolean>? = null
-
-    /** Qué espera la continuación: 0 nada, 1 registro, 2 conexión. */
-    private var continuationKind = KIND_NONE
-
-    /** Una única operación de registro en curso (prepare/connect/observadores). */
-    private val registrationMutex = Mutex()
+    private var generation = 0
+    private var registered = false
+    private var registration: CompletableDeferred<Boolean>? = null
+    private var connection: CompletableDeferred<Boolean>? = null
+    private val operations = Mutex()
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { mainHandler.post(it) }
 
-    private val serviceListener = object : BluetoothProfile.ServiceListener {
-        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-            if (profile != BluetoothProfile.HID_DEVICE) return
-            val hidProxy = proxy as BluetoothHidDevice
-            hid = hidProxy
-            val ok = try {
-                hidProxy.registerApp(sdpSettings(), null, null, mainExecutor, hidCallback)
-            } catch (e: Exception) {
-                emit(TransportEvent.Failed("registerApp: ${e.message}"))
+    val connectedAddress: String? get() = device?.address
+
+    suspend fun prepare() = operations.withLock {
+        if (ensureRegistered()) {
+            discoverConnectedHost()
+        } else {
+            emit(TransportEvent.Info("Perfil HID no disponible ahora. Consulta el diagnóstico."))
+        }
+    }
+
+    override suspend fun connect(device: BluetoothDevice): Boolean = operations.withLock {
+        expectedAddress = device.address
+        val previous = this.device
+        if (previous != null && previous.address != device.address) {
+            runCatching { hid?.disconnect(previous) }
+            this.device = null
+        }
+        _state.value = TransportState.CONNECTING
+
+        if (!ensureRegistered()) return@withLock fail(
+            "Android no confirmó el registro HID. ColorOS puede limitar el perfil o exigir la app en primer plano."
+        )
+        discoverConnectedHost()
+        if (_state.value == TransportState.CONNECTED && this.device?.address == device.address) {
+            return@withLock true
+        }
+
+        val confirmation = CompletableDeferred<Boolean>()
+        connection = confirmation
+        try {
+            val requested = runCatching { hid?.connect(device) == true }.getOrElse {
+                return@withLock fail("Conexión HID: ${it.message ?: it.javaClass.simpleName}")
+            }
+            if (!requested) return@withLock fail(
+                "Android rechazó la conexión HID. Intenta conectar desde Windows o usa Receptor Windows."
+            )
+            val connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) { confirmation.await() }
+            if (connected == true && _state.value == TransportState.CONNECTED) return@withLock true
+            runCatching { hid?.disconnect(device) }
+            fail("Windows no confirmó la conexión HID con ${device.safeDisplayName()}.")
+        } finally {
+            connection = null
+        }
+    }
+
+    override suspend fun sendInput(snapshot: InputSnapshot) {
+        val target = device ?: throw IOException("Sin host HID")
+        val proxy = hid ?: throw IOException("Perfil HID no disponible")
+        withContext(Dispatchers.IO) {
+            if (!proxy.sendReport(target, REPORT_ID, buildReport(snapshot))) {
+                throw IOException("Android rechazó el reporte HID")
+            }
+        }
+    }
+
+    override suspend fun releaseAll() = sendInput(InputSnapshot())
+
+    override fun close() {
+        releaseProfile()
+        expectedAddress = null
+        _state.value = TransportState.DISCONNECTED
+    }
+
+    private fun releaseProfile() {
+        generation++
+        val proxy = hid
+        val target = device
+        hid = null
+        device = null
+        registered = false
+        registration?.complete(false)
+        connection?.complete(false)
+        if (proxy != null) {
+            if (target != null) runCatching { proxy.disconnect(target) }
+            runCatching { proxy.unregisterApp() }
+            runCatching { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, proxy) }
+        }
+        _deviceName.value = null
+    }
+
+    private suspend fun ensureRegistered(): Boolean {
+        if (hid != null && registered) return true
+        releaseProfile()
+        val radio = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+            ?: return false
+        adapter = radio
+        val id = generation
+        val ready = CompletableDeferred<Boolean>()
+        registration = ready
+        var accepted = false
+        try {
+            val requested = runCatching {
+                radio.getProfileProxy(context, serviceListener(radio, id), BluetoothProfile.HID_DEVICE)
+            }.getOrElse {
+                log.add("HID getProfileProxy: ${it.message ?: it.javaClass.simpleName}")
                 false
             }
-            if (!ok) {
-                emit(TransportEvent.Failed("El sistema rechazó el registro HID (común en ColorOS)."))
-                resumeIfWaiting(false)
+            if (!requested) return false
+            accepted = withTimeoutOrNull(REGISTRATION_TIMEOUT_MS) { ready.await() } == true && registered
+            return accepted
+        } finally {
+            registration = null
+            if (!accepted && generation == id) releaseProfile()
+        }
+    }
+
+    private fun serviceListener(radio: BluetoothAdapter, id: Int) = object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+            if (profile != BluetoothProfile.HID_DEVICE) return
+            mainHandler.post {
+                if (id != generation) {
+                    runCatching { radio.closeProfileProxy(profile, proxy) }
+                    return@post
+                }
+                val hidProxy = proxy as BluetoothHidDevice
+                hid = hidProxy
+                val sdp = BluetoothHidDeviceAppSdpSettings(
+                    "Phantom Pad", "Mando virtual Phantom Pad", "Phantom Pad",
+                    BluetoothHidDevice.SUBCLASS2_GAMEPAD, REPORT_DESCRIPTOR
+                )
+                val requested = runCatching { hidProxy.registerApp(sdp, null, null, mainExecutor, callback(id)) }
+                    .getOrElse {
+                        log.add("HID registerApp: ${it.message ?: it.javaClass.simpleName}")
+                        false
+                    }
+                if (!requested) {
+                    log.add("HID: Android rechazó registerApp().")
+                    registration?.complete(false)
+                }
             }
         }
 
         override fun onServiceDisconnected(profile: Int) {
-            if (profile == BluetoothProfile.HID_DEVICE) {
-                hid = null
-                registered = false
-                plugged = false
-                if (_state.value == TransportState.CONNECTED) {
-                    _state.value = TransportState.DISCONNECTED
-                    emit(TransportEvent.Info("Servicio HID del sistema detenido."))
-                }
+            mainHandler.post {
+                if (profile != BluetoothProfile.HID_DEVICE || id != generation) return@post
+                releaseProfile()
+                fail("El servicio HID se desconectó.")
             }
         }
     }
 
-    private val hidCallback = object : BluetoothHidDevice.Callback() {
-
+    private fun callback(id: Int) = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, isRegistered: Boolean) {
+            if (id != generation) return
             registered = isRegistered
-            log.add("HID: onAppStatusChanged (registrado=$isRegistered, host=${pluggedDevice?.safeDisplayName() ?: "ninguno"})")
-            if (!isRegistered) {
-                if (plugged) markDisconnected(pluggedDevice)
-                emit(TransportEvent.Info("HID: registro del sistema retirado."))
-                resumeIfWaiting(false)
-                return
-            }
-            if (pluggedDevice != null) {
-                // El host ya está enchufado a la app (registrado con el PC ya conectado).
-                markConnected(pluggedDevice)
+            registration?.complete(isRegistered)
+            if (isRegistered) {
+                log.add("HID: registro confirmado por Android.")
+                // pluggedDevice puede ser el cable virtual recordado y no un canal activo.
+                discoverConnectedHost()
             } else {
-                emit(TransportEvent.Info("HID registrado en el sistema."))
-                checkAlreadyConnectedHosts()
-                // Solo libera la espera del REGISTRO; la espera de CONEXIÓN la
-                // resuelven markConnected/markDisconnected para no provocar
-                // falsos fallos si el sistema repite este callback.
-                if (continuationKind == KIND_REGISTRATION) resumeIfWaiting(true)
+                releaseProfile()
+                fail("Android retiró el registro HID. Mantén Phantom Pad en primer plano.")
             }
         }
 
         override fun onConnectionStateChanged(host: BluetoothDevice, state: Int) {
+            if (id != generation || !registered || !matchesHost(host)) return
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> markConnected(host)
-                BluetoothProfile.STATE_CONNECTING -> {
-                    if (_state.value == TransportState.DISCONNECTED) {
-                        _state.value = TransportState.CONNECTING
-                        emit(TransportEvent.Info("HID: conectando con ${host.safeDisplayName()}..."))
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    if (device?.address == host.address) {
+                        device = null
+                        _deviceName.value = null
+                        _state.value = TransportState.DISCONNECTED
+                        emit(TransportEvent.Info("HID desconectado de ${host.safeDisplayName()}."))
                     }
+                    if (expectedAddress == host.address) connection?.complete(false)
                 }
-                BluetoothProfile.STATE_DISCONNECTING -> emit(
-                    TransportEvent.Info("HID: desconectando de ${host.safeDisplayName()}...")
-                )
-                BluetoothProfile.STATE_DISCONNECTED -> markDisconnected(host)
             }
         }
     }
 
-    /** Registra la app HID y queda a la escucha: modo supervisión pasiva. */
-    suspend fun prepare() {
-        if (_state.value == TransportState.CONNECTED) return
-        if (hid != null && registered) {
-            checkAlreadyConnectedHosts()
-            return
-        }
-        emit(TransportEvent.Info("HID: preparando el servicio del sistema..."))
-        if (ensureRegistered(soft = true)) {
-            emit(TransportEvent.Info("HID listo: si el PC se conecta, la app lo detecta sola."))
-            checkAlreadyConnectedHosts()
-        }
+    private fun matchesHost(host: BluetoothDevice): Boolean {
+        val address = expectedAddress ?: device?.address
+        return address == null || address == host.address
     }
 
-    /** Dirección del host conectado (o null si no hay sesión activa). */
-    val connectedAddress: String?
-        get() = if (_state.value == TransportState.CONNECTED) device?.address else null
-
-    override suspend fun connect(target: BluetoothDevice): Boolean {
-        val sameHost = device?.address == target.address &&
-            _state.value == TransportState.CONNECTED
-        device = target
-        _deviceName.value = target.safeDisplayName()
-        if (sameHost) {
-            emit(TransportEvent.Info("Ya conectado a ${_deviceName.value}."))
-            return true
-        }
-        if (_state.value == TransportState.CONNECTED) {
-            // Sesión activa con otro host: rehacer el registro para el nuevo.
-            emit(TransportEvent.Info("Cambiando de host: liberando la sesión anterior..."))
-            close()
-        }
-        _state.value = TransportState.CONNECTING
-        connectConfirmed = false
-        expectedAddress = target.address
-        if (!ensureRegistered(soft = false)) {
-            expectedAddress = null
-            return false
-        }
-
-        // 1) ¿El host PEDIDO ya está conectado a nivel de sistema? (caso típico:
-        //    el celular ya aparece "conectado a DESKTOP-XXXX" en ajustes).
-        //    Solo vale el host exacto: nada de "coger el primero que haya".
-        connectedHostNow(target.address)?.let { markConnected(it); return true }
-
-        // 2) Pedir conexión al host elegido.
-        val requested = try {
-            hid?.connect(target) == true
-        } catch (e: Exception) {
-            emit(TransportEvent.Failed("connect(): ${e.message}"))
-            false
-        }
-        if (!requested) {
-            expectedAddress = null
-            fail(
-                "El sistema rechazó la conexión HID hacia ${target.safeDisplayName()}. " +
-                    "Prueba conectar desde Windows o usa el modo Receptor Windows."
-            )
-            return false
-        }
-
-        // 3) Esperar la confirmación. La carrera clásica (Windows confirma
-        //    mientras montamos la espera) se cubre: si el callback ya marcó
-        //    CONNECTED, no se espera ni un ms.
-        if (_state.value == TransportState.CONNECTED || connectConfirmed) {
-            return true
-        }
-        val confirmed = awaitConfirmation(KIND_CONNECTION, CONNECT_TIMEOUT_MS)
-        expectedAddress = null
-        if (!confirmed || _state.value != TransportState.CONNECTED) {
-            fail("El PC no completó la conexión HID en ${CONNECT_TIMEOUT_MS / 1000} s.")
-            return false
-        }
-        return true
-    }
-
-    override suspend fun sendInput(snapshot: InputSnapshot) {
-        val hidProxy = hid ?: throw IOException("HID no registrado")
-        val target = device ?: throw IOException("Sin host HID")
-        val report = buildReport(snapshot)
-        withContext(Dispatchers.IO) {
-            if (!hidProxy.sendReport(target, REPORT_ID, report)) {
-                throw IOException("sendReport rechazado")
-            }
-        }
-    }
-
-    override suspend fun releaseAll() {
-        try {
-            sendInput(InputSnapshot())
-        } catch (_: Exception) {
-            // liberación tolerante a fallos
-        }
-    }
-
-    override suspend fun close() {
-        expectedAddress = null
-        connectConfirmed = false
-        runCatching { hid?.unregisterApp() }
-        val hidProxy = hid
-        val adapterLocal = adapter
-        if (hidProxy != null && adapterLocal != null) {
-            runCatching { adapterLocal.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidProxy) }
-        }
-        hid = null
-        registered = false
-        plugged = false
-        if (_state.value != TransportState.FAILED) {
-            _state.value = TransportState.DISCONNECTED
-        }
-        emit(TransportEvent.Info("HID cerrado."))
-    }
-
-    // ------------------------------------------------------------------ interno
-
-    private fun sdpSettings() = BluetoothHidDeviceAppSdpSettings(
-        "Phantom Pad",
-        "Mando virtual Phantom Pad",
-        "Phantom Pad",
-        BluetoothHidDevice.SUBCLASS2_GAMEPAD,
-        REPORT_DESCRIPTOR
-    )
-
-    private suspend fun ensureRegistered(soft: Boolean): Boolean {
-        if (hid != null && registered) return true
-        // Una sola operación de registro en curso: prepare(), connect() y los
-        // observadores del ViewModel pueden llamar aquí a la vez.
-        registrationMutex.withLock {
-            if (hid != null && registered) return true
-            val adapterLocal =
-                (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
-            adapter = adapterLocal
-            if (adapterLocal == null) {
-                if (soft) {
-                    emit(TransportEvent.Info("Bluetooth no disponible ahora."))
-                } else {
-                    fail("Este dispositivo no tiene Bluetooth.")
-                }
-                return false
-            }
-            log.add("HID: solicitando perfil HID_DEVICE del sistema...")
-            val ready = withTimeoutOrNull(REGISTRATION_TIMEOUT_MS) {
-                suspendCancellableCoroutine { cont ->
-                    continuation = cont
-                    continuationKind = KIND_REGISTRATION
-                    val requested = try {
-                        adapterLocal.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
-                    } catch (e: Exception) {
-                        emit(TransportEvent.Failed("getProfileProxy: ${e.message}"))
-                        false
-                    }
-                    if (!requested) {
-                        continuation = null
-                        continuationKind = KIND_NONE
-                        cont.resume(false)
-                    }
-                }
-            } ?: false
-            if (!ready || !registered) {
-                if (soft) {
-                    _state.value = TransportState.DISCONNECTED
-                    emit(
-                        TransportEvent.Info(
-                            "Registro HID no disponible ahora (el sistema puede bloquearlo); " +
-                                "pulsa Conectar para reintentar."
-                        )
-                    )
-                } else {
-                    fail(
-                        "No se pudo registrar como dispositivo HID en ${REGISTRATION_TIMEOUT_MS / 1000} s. " +
-                            "ColorOS puede restringir este perfil; usa el modo Receptor Windows."
-                    )
-                }
-                return false
-            }
-            return true
-        }
-    }
-
-    /**
-     * Host conectado AHORA. Con address no nulo exige coincidencia exacta
-     * (la conexión se verifica contra el host pedido, sin fallback a "cualquiera");
-     * con address nulo (supervisión pasiva) acepta cualquier host.
-     */
-    private fun connectedHostNow(address: String?): BluetoothDevice? = try {
-        val hosts = hid?.getConnectedDevices().orEmpty()
-        if (address == null) hosts.firstOrNull() else hosts.firstOrNull { it.address == address }
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun checkAlreadyConnectedHosts() {
-        connectedHostNow(device?.address)?.let { markConnected(it) }
+    private fun discoverConnectedHost() {
+        val connected = runCatching { hid?.connectedDevices.orEmpty() }.getOrDefault(emptyList())
+        connected.firstOrNull(::matchesHost)?.let(::markConnected)
     }
 
     private fun markConnected(host: BluetoothDevice) {
-        // Verificación de identidad: durante una conexión dirigida solo cuenta
-        // el host pedido; cualquier otro se ignora y se deja constancia.
-        val expected = expectedAddress
-        if (expected != null && host.address != expected) {
-            log.add("HID: conexión de ${host.safeDisplayName()} ignorada (se esperaba $expected).")
-            return
-        }
-        plugged = true
+        if (!registered || !matchesHost(host)) return
         device = host
         _deviceName.value = host.safeDisplayName()
-        connectConfirmed = true
-        if (_state.value != TransportState.CONNECTED) {
-            _state.value = TransportState.CONNECTED
-            emit(TransportEvent.Info("HID conectado a ${host.safeDisplayName()}."))
-        }
-        resumeIfWaiting(true)
+        _state.value = TransportState.CONNECTED
+        connection?.complete(true)
     }
 
-    private fun markDisconnected(host: BluetoothDevice?) {
-        plugged = false
-        connectConfirmed = false
-        val was = _state.value
-        if (was == TransportState.CONNECTED) {
-            _state.value = TransportState.DISCONNECTED
-            emit(
-                TransportEvent.Info(
-                    "HID desconectado${host?.let { " de ${it.safeDisplayName()}" } ?: ""}."
-                )
-            )
-        } else if (was == TransportState.CONNECTING) {
-            _state.value = TransportState.DISCONNECTED
-        }
-        if (was == TransportState.CONNECTING && continuationKind == KIND_CONNECTION) {
-            resumeIfWaiting(false)
-        }
-    }
-
-    private suspend fun awaitConfirmation(kind: Int, timeoutMs: Long): Boolean =
-        withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine { cont ->
-                continuation = cont
-                continuationKind = kind
-            }
-        } ?: false
-
-    private fun resumeIfWaiting(value: Boolean) {
-        val cont = continuation ?: return
-        continuation = null
-        continuationKind = KIND_NONE
-        if (cont.isActive) cont.resume(value)
-    }
-
-    private suspend fun fail(message: String) {
+    private fun fail(message: String): Boolean {
         log.add(message)
         _state.value = TransportState.FAILED
         emit(TransportEvent.Failed(message))
-        resumeIfWaiting(false)
-        delay(50) // ceder el hilo para que la UI procese el evento
+        return false
     }
 
     private fun buildReport(s: InputSnapshot): ByteArray {
@@ -438,16 +291,7 @@ class HidTransport(
         }
     }
 
-    private fun BluetoothDevice.safeDisplayName(): String = try {
-        name ?: address
-    } catch (_: SecurityException) {
-        address
-    }
-
     companion object {
-        private const val KIND_NONE = 0
-        private const val KIND_REGISTRATION = 1
-        private const val KIND_CONNECTION = 2
         private const val REPORT_ID = 0x01
         private const val REPORT_DATA_LEN = 9
         private const val REGISTRATION_TIMEOUT_MS = 12_000L
@@ -499,6 +343,7 @@ class HidTransport(
             0x75, 0x04, //   Report Size (4)
             0x95.toByte(), 0x01, //   Report Count (1)
             0x81.toByte(), 0x42, //   Input (Data, Var, Abs, Null State)
+            0x65, 0x00, //   Restablecer unidad antes del padding
             0x75, 0x04, //   Report Size (4)
             0x95.toByte(), 0x01, //   Report Count (1)
             0x81.toByte(), 0x03, //   Input (Const, Var, Abs)

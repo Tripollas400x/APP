@@ -62,7 +62,7 @@ Tipos:
 
 ## PING / PONG
 
-Payload: `seq` (u16). El teléfono envía PING periódicamente y el PC responde con PONG con la misma secuencia. El teléfono calcula el RTT. Si no hay PONG en 3 segundos, la conexión se considera degradada y se registra en el log.
+Payload: `seq` (u16). Ambos extremos pueden iniciar PING. El otro extremo responde PONG con la misma secuencia. Cada medición vence a los 3 segundos. Android verifica el canal con el primer PONG y reintenta el enlace tras varias pérdidas consecutivas según sus ajustes. El RTT mide el canal y sus colas, sin medir cuándo un juego consume el informe.
 
 ## RUMBLE
 
@@ -70,7 +70,7 @@ Payload: `small` (u8, motor pequeño) y `large` (u8, motor grande). El receptor 
 
 ## RELEASE_ALL
 
-Sin payload. Se envía al pausar, desconectar o por el watchdog. El receptor también aplica failsafe propio: si no recibe tramas durante 1000 ms, libera el mando virtual (protección contra botones atascados).
+Sin payload. Android intenta enviarlo antes de desconectar y mantiene reportes neutros mientras los controles están pausados. El receptor también libera el mando si deja de recibir INPUT válido durante 1000 ms.
 
 ## Reglas de conversión
 

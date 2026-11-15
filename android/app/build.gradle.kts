@@ -23,8 +23,8 @@ android {
         applicationId = "com.phantompad.app"
         minSdk = 28          // BluetoothHidDevice requiere API 28 (método A)
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.2.1"
+        versionCode = 7
+        versionName = "0.2.2"
     }
 
     signingConfigs {

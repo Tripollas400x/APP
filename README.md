@@ -11,7 +11,7 @@
 | Interfaz PC | C# / .NET 8 (WinForms) |
 | Emulación PC | ViGEmBus (Xbox 360 / DualShock 4) |
 
-## Estado real del proyecto (v0.1.0)
+## Estado del proyecto (v0.2.2)
 
 Este proyecto se mantiene honesto: nada de funciones simuladas ni promesas sin medir.
 
@@ -68,7 +68,7 @@ La app envía estados binarios por RFCOMM/SPP a un receptor C# en el PC, que ali
 2. Abre `PhantomPadReceiver.exe` en el PC y pulsa **Iniciar**.
 3. Abre Phantom Pad en el teléfono, concede los permisos Bluetooth.
 4. Elige el PC en la lista y pulsa conectar.
-5. Al conectar entras al modo mando. Prueba los botones en la ventana del receptor.
+5. En modo Xbox 360, usa **Prueba local (joy.cpl)** antes de conectar el teléfono. Después conecta y verifica que los controles llegan al juego.
 6. Ajusta perfiles, tamaño y opacidad desde el editor.
 7. Juega.
 
@@ -85,7 +85,7 @@ Frame de 30 bytes: cabecera `0x50 0x50 0x01`, tipo, secuencia, máscara de 16 bo
 
 ## Latencia
 
-La app mide el RTT real (ping/pong a 1 Hz) y muestra el promedio y el mínimo en el diagnóstico y en el receptor. No publicamos cifras "de marketing": la frecuencia de envío es configurable (30-240 Hz) y el resultado depende del hardware. El receptor aplica un failsafe: si deja de recibir tramas 1 segundo, libera todos los botones.
+Cada extremo mide el RTT de RFCOMM mediante PING/PONG. Android muestra la última muestra, promedio y expiraciones. La frecuencia es configurable entre 30 y 240 Hz. Los ajustes nuevos comienzan en 60 Hz. El receptor neutraliza el mando tras 1 segundo sin INPUT válido.
 
 ## Estructura del repositorio
 

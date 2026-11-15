@@ -38,12 +38,13 @@ public sealed class RfcommServer
     public const string ServiceName = "Phantom Pad Receiver";
 
     /// <summary>Se asigna desde el motor; recibe cada socket entrante.</summary>
-    public Func<StreamSocket, Task>? ConnectionAccepted;
+    public Func<StreamSocket, CancellationToken, Task>? ConnectionAccepted;
 
     public event Action<string>? Log;
 
     private RfcommServiceProvider? _provider;
     private StreamSocketListener? _listener;
+    private CancellationToken _lifetime;
     private int _connections;
 
     public bool IsAdvertising => _provider != null;
@@ -51,16 +52,17 @@ public sealed class RfcommServer
     /// <summary>Descripción legible del último error de publicación (null si OK).</summary>
     public string? LastError { get; private set; }
 
-    public async Task StartAsync()
+    public async Task StartAsync(CancellationToken ct)
     {
         if (_provider != null) return;
         LastError = null;
+        _lifetime = ct;
 
         try
         {
             // ------------------------------------------------ 0) adaptador
             Log?.Invoke("[BT] Comprobando el adaptador Bluetooth...");
-            var adapter = await BluetoothAdapter.GetDefaultAsync();
+            var adapter = await BluetoothAdapter.GetDefaultAsync().AsTask(ct);
             if (adapter == null)
             {
                 throw new RfcommServerException(
@@ -73,7 +75,7 @@ public sealed class RfcommServer
             }
             try
             {
-                var radios = await Radio.GetRadiosAsync();
+                var radios = await Radio.GetRadiosAsync().AsTask(ct);
                 var btRadio = radios.FirstOrDefault(r => r.Kind == RadioKind.Bluetooth);
                 if (btRadio != null && btRadio.State != RadioState.On)
                 {
@@ -84,7 +86,7 @@ public sealed class RfcommServer
                 Log?.Invoke("[BT] Adaptador disponible (radio " + (btRadio?.Name ?? "Bluetooth") + ", estado " +
                             (btRadio?.State.ToString() ?? "desconocido") + ").");
             }
-            catch (RfcommServerException)
+            catch (Exception ex) when (ex is RfcommServerException or OperationCanceledException)
             {
                 throw;
             }
@@ -100,9 +102,9 @@ public sealed class RfcommServer
             try
             {
                 provider = await RfcommServiceProvider.CreateAsync(
-                    RfcommServiceId.FromUuid(Guid.Parse(ServiceUuidText)));
+                    RfcommServiceId.FromUuid(Guid.Parse(ServiceUuidText))).AsTask(ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 throw new RfcommServerException(
                     "[BT] RfcommServiceProvider.CreateAsync falló: " + Detail(ex) +
@@ -113,7 +115,7 @@ public sealed class RfcommServer
             // ------------------------------------------------ 2) SDP
             Log?.Invoke("[BT] Configurando SDP (nombre de servicio)...");
             byte[] nameBytes = Encoding.UTF8.GetBytes(ServiceName);
-            var writer = new DataWriter();
+            using var writer = new DataWriter();
             writer.WriteByte(0x25); // elemento SDP: tipo TextString, tamaño "1 byte de longitud"
             writer.WriteByte((byte)nameBytes.Length);
             writer.WriteBytes(nameBytes);
@@ -121,6 +123,7 @@ public sealed class RfcommServer
 
             // ------------------------------------------------ 3) listener
             var listener = new StreamSocketListener();
+            _listener = listener;
             listener.ConnectionReceived += OnListenerConnectionReceived;
             Log?.Invoke("[BT] Enlazando listener al canal RFCOMM...");
             try
@@ -131,32 +134,38 @@ public sealed class RfcommServer
                 // nivel que usa la muestra oficial de Microsoft para RFCOMM.
                 await listener.BindServiceNameAsync(
                     provider.ServiceId.AsString(),
-                    SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+                    SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication).AsTask(ct);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                listener.Dispose();
                 throw new RfcommServerException(
                     "[BT] BindServiceNameAsync falló: " + Detail(ex) +
                     " — Pista: reinicia el Bluetooth del PC si acabas de cerrar otra sesión.", ex);
             }
 
             // ------------------------------------------------ 4) publicar
+            ct.ThrowIfCancellationRequested();
             provider.StartAdvertising(listener);
             _provider = provider;
-            _listener = listener;
             Log?.Invoke("[BT] Servicio publicado correctamente. Esperando conexión Android " +
                         "(el teléfono debe estar EMPAREJADO con este PC)...");
         }
-        catch (RfcommServerException)
+        catch (OperationCanceledException)
         {
-            Cleanup();
+            Stop();
+            throw;
+        }
+        catch (RfcommServerException ex)
+        {
+            Stop();
+            LastError = ex.Message;
             throw;
         }
         catch (Exception ex)
         {
-            Cleanup();
-            throw new RfcommServerException("[BT] No se pudo publicar el servicio RFCOMM: " + Detail(ex), ex);
+            Stop();
+            LastError = "[BT] No se pudo publicar el servicio RFCOMM: " + Detail(ex);
+            throw new RfcommServerException(LastError, ex);
         }
     }
 
@@ -165,7 +174,13 @@ public sealed class RfcommServer
         var socket = args.Socket;
         try
         {
-            _connections++;
+            var ct = _lifetime;
+            if (!ReferenceEquals(sender, _listener) || ct.IsCancellationRequested)
+            {
+                socket.Dispose();
+                return;
+            }
+            int connection = Interlocked.Increment(ref _connections);
             string peer;
             try
             {
@@ -173,7 +188,7 @@ public sealed class RfcommServer
             }
             catch
             {
-                peer = "dispositivo " + _connections; // el nombre remoto puede faltar según el adaptador
+                peer = "dispositivo " + connection; // el nombre remoto puede faltar según el adaptador
             }
             Log?.Invoke("[BT] Cliente conectado: " + peer + ".");
             var handler = ConnectionAccepted;
@@ -183,7 +198,7 @@ public sealed class RfcommServer
                 socket.Dispose();
                 return;
             }
-            await handler(socket);
+            await handler(socket, ct);
         }
         catch (Exception ex)
         {
@@ -203,14 +218,6 @@ public sealed class RfcommServer
         try { provider?.StopAdvertising(); } catch { /* al cerrar puede fallar y no importa */ }
         try { listener?.Dispose(); } catch { }
         Log?.Invoke("[BT] Servicio detenido (SDP retirado).");
-    }
-
-    private void Cleanup()
-    {
-        try { _provider?.StopAdvertising(); } catch { }
-        try { _listener?.Dispose(); } catch { }
-        _provider = null;
-        _listener = null;
     }
 
     /// <summary>

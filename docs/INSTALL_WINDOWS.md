@@ -20,8 +20,8 @@
 
 ## Comprobar que Windows ve el mando
 
-- Pulsa `Win + R`, escribe `joy.cpl` y acepta: debe aparecer "Xbox 360 Controller" con estado "OK" cuando el teléfono esté conectado.
-- El botón **Propiedades** de `joy.cpl` permite verificar ejes y botones sin abrir ningún juego.
+- Pulsa `Win + R`, escribe `joy.cpl` y acepta: debe aparecer "Xbox 360 Controller" con estado "OK" al iniciar el receptor. El teléfono puede permanecer desconectado.
+- Abre **Propiedades** en `joy.cpl` y pulsa **Prueba local** en el receptor. Comprueba ejes, botones y el estado «entrada comprobada» para Xbox 360. Detén la sesión del teléfono antes de hacer el barrido.
 
 ## Modo DualShock 4: expectativas honestas
 

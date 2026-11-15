@@ -4,6 +4,15 @@ Todas las cambios notables de este proyecto se documentan aquí.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.2.2] - 2026-11-15 — Recuperación de conexión y mando
+
+- Windows procesa lecturas RFCOMM parciales y publica pausas, RTT, caudal, secuencias y contadores completos del parser.
+- Cada enlace posee su socket, lector y escritor. El botón Detener cancela la publicación, los reintentos y las sesiones. La prueba local se cancela cuando se conecta un teléfono.
+- Xbox 360 distingue registro en ViGEm, enumeración e input comprobado con XInput. El valor bruto 255 indica que ViGEm aún no informó un índice válido.
+- Android confirma el canal por PONG, reconecta al mismo host cuando se pierde el enlace y puede cancelar los intentos. Pings caducados dejan de contribuir al RTT.
+- HID directo conserva la supervisión del host, separa la confirmación del registro y de la conexión e ignora callbacks de perfiles retirados o de otros hosts.
+- Los parsers pueden recuperar una trama cuya cabecera venía justo después de una trama incompleta o corrupta.
+
 ## [0.2.1 / Receptor 0.2.1] - 2026-11-15 — BLUETOOTH & CONTROLLER FIX
 
 ### Corregido — Receptor Windows

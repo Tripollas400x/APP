@@ -2,67 +2,57 @@ package com.phantompad.app.gamepad
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Mide el RTT real del transporte: el teléfono manda PING con secuencia y
- * el receptor responde PONG con la misma secuencia. Guarda las últimas
- * muestras y expone promedio, mínimo y máximo.
- */
-class LatencyMeter {
-
+/** RTT RFCOMM; no incluye la entrega del estado al juego. */
+class LatencyMeter(private val now: () -> Long = System::nanoTime) {
     data class LatencyStats(
         val lastMs: Double? = null,
         val avgMs: Double? = null,
         val minMs: Double? = null,
         val maxMs: Double? = null,
-        val samples: Int = 0
+        val samples: Int = 0,
+        val lost: Int = 0
     )
 
-    private val pending = ConcurrentHashMap<Int, Long>()
+    private val pending = mutableMapOf<Int, Long>()
     private val recent = ArrayDeque<Double>()
-    private val lock = Any()
-
     private val _stats = MutableStateFlow(LatencyStats())
     val stats: StateFlow<LatencyStats> = _stats
 
+    @Synchronized
     fun onPingSent(seq: Int) {
-        pending[seq] = System.nanoTime()
+        expire()
+        pending[seq] = now()
     }
 
+    @Synchronized
     fun onPongReceived(seq: Int): Boolean {
+        expire()
         val started = pending.remove(seq) ?: return false
-        val rtt = (System.nanoTime() - started) / 1e6
-        synchronized(lock) {
-            recent.addLast(rtt)
-            while (recent.size > MAX_SAMPLES) recent.removeFirst()
-            val list = recent.toList()
-            _stats.value = LatencyStats(
-                lastMs = rtt,
-                avgMs = list.average(),
-                minMs = list.minOrNull(),
-                maxMs = list.maxOrNull(),
-                samples = list.size
-            )
-        }
+        val rtt = (now() - started) / 1e6
+        recent.addLast(rtt)
+        if (recent.size > 30) recent.removeFirst()
+        _stats.value = _stats.value.copy(
+            lastMs = rtt, avgMs = recent.average(), minMs = recent.minOrNull(),
+            maxMs = recent.maxOrNull(), samples = recent.size
+        )
         return true
     }
 
-    /** Secuencias que llevan más de [ageMs] sin respuesta (conexión degradada). */
-    fun hasStalePending(ageMs: Long): Boolean {
-        val cutoff = System.nanoTime() - ageMs * 1_000_000
-        return pending.values.any { it < cutoff }
+    @Synchronized
+    fun expire(): Int {
+        val before = pending.size
+        val time = now()
+        pending.values.removeAll { time - it >= 3_000_000_000L }
+        val lost = before - pending.size
+        if (lost > 0) _stats.value = _stats.value.copy(lastMs = null, lost = _stats.value.lost + lost)
+        return lost
     }
 
+    @Synchronized
     fun reset() {
         pending.clear()
-        synchronized(lock) {
-            recent.clear()
-            _stats.value = LatencyStats()
-        }
-    }
-
-    companion object {
-        private const val MAX_SAMPLES = 30
+        recent.clear()
+        _stats.value = LatencyStats()
     }
 }

@@ -10,7 +10,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>PhantomPadReceiver</AssemblyName>
     <RootNamespace>PhantomPadReceiver</RootNamespace>
-    <Version>0.2.1</Version>
+    <Version>0.2.2</Version>
   </PropertyGroup>
 
   <ItemGroup>

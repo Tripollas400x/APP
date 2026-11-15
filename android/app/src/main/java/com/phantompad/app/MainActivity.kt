@@ -27,6 +27,16 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: PadViewModel by viewModels()
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.setForeground(true)
+    }
+
+    override fun onPause() {
+        viewModel.setForeground(false)
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {

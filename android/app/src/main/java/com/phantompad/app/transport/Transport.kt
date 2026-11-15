@@ -22,7 +22,7 @@ enum class TransportMode(val label: String, val hint: String) {
 }
 
 sealed class TransportEvent {
-    data class RttMeasured(val ms: Double) : TransportEvent()
+    data object ReleaseInputs : TransportEvent()
     data class Rumble(val small: Int, val large: Int) : TransportEvent()
     data class Info(val message: String) : TransportEvent()
     data class Failed(val message: String) : TransportEvent()
@@ -49,7 +49,7 @@ interface Transport {
     /** Notifica un fallo de envío detectado por el hilo de entrada. */
     suspend fun onSendFailure(cause: Exception)
 
-    suspend fun close()
+    fun close()
 }
 
 /** Base con utilidades comunes de estado y eventos para los transportes. */

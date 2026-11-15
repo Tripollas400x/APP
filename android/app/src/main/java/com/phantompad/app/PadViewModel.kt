@@ -1,6 +1,7 @@
 package com.phantompad.app
 
 import android.app.Application
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.os.Build
 import android.os.VibrationEffect
@@ -25,7 +26,14 @@ import com.phantompad.app.transport.TransportEvent
 import com.phantompad.app.transport.TransportState
 import com.phantompad.app.util.BatteryMonitor
 import com.phantompad.app.util.ConnectionLog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,8 +61,12 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
 
     private var transport: Transport? = null
     private var eventJob: Job? = null
-    private var reconnectJob: Job? = null
-    private var connectingJob: Job? = null
+    private var connectionJob: Job? = null
+    private val connectionLock = Mutex()
+    private var requestedMode: TransportModeWire? = null
+    private var passiveHidAllowed = true
+    private var foreground = false
+    private var gamepadVisible = false
 
     private val _transportState = MutableStateFlow(TransportState.DISCONNECTED)
     val transportState: StateFlow<TransportState> = _transportState
@@ -65,20 +77,34 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Atenuar el giroscopio según ajustes al arrancar.
         viewModelScope.launch { gyro.setEnabled(settings.value.gyroEnabled) }
-        // Modo HID: registrar el servicio al abrir la app para detectar en vivo
-        // la conexión del PC (sin pulsar nada).
-        ensureHidMonitor()
         viewModelScope.launch {
-            settings.collect { ensureHidMonitor() }
+            var mode = settings.value.transportMode
+            settings.collect { current ->
+                if (mode != current.transportMode) {
+                    mode = current.transportMode
+                    passiveHidAllowed = true
+                    requestedMode = null
+                    replaceConnection {
+                        closeTransport()
+                        _transportState.value = TransportState.DISCONNECTED
+                    }
+                    val closing = connectionJob
+                    closing?.invokeOnCompletion { viewModelScope.launch { ensureHidMonitor() } }
+                } else {
+                    ensureHidMonitor()
+                }
+            }
         }
         viewModelScope.launch {
             bt.enabled.collect { on ->
-                if (on) {
-                    ensureHidMonitor()
-                } else {
-                    // Bluetooth apagado: la sesión HID murió a nivel sistema.
-                    if (transport is HidTransport) disconnectInternal()
+                if (!on && requestedMode == null && transport is HidTransport) {
+                    replaceConnection {
+                        closeTransport()
+                        _transportState.value = TransportState.DISCONNECTED
+                    }
+                    connectionJob?.invokeOnCompletion { viewModelScope.launch { ensureHidMonitor() } }
                 }
+                if (on) ensureHidMonitor()
             }
         }
     }
@@ -108,195 +134,190 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     // -------------------------------------------------------------- conexión
 
     fun connectTo(device: BtDeviceUi) {
-        // Cancela cualquier intento anterior para no dejar dos bucles conectando.
-        connectingJob?.cancel()
-        connectingJob = viewModelScope.launch {
-            val target = bt.getDevice(device.address)
-            if (target == null) {
-                log.add("No se pudo resolver el dispositivo ${device.address}")
-                return@launch
-            }
-            // Un discovery activo sabotea la conexión RFCOMM (SDP y canal):
-            // se cancela SIEMPRE antes de crear el transporte.
-            bt.stopScan()
-            if (!bt.isBonded(device.address)) {
-                log.add("Iniciando emparejamiento con ${device.name}...")
-                val bonded = bt.ensureBonded(target)
-                if (!bonded) {
-                    log.add("Emparejamiento no completado.")
-                    _transportState.value = TransportState.FAILED
-                    return@launch
+        val mode = settings.value.transportMode
+        requestedMode = mode
+        replaceConnection {
+            closeTransport()
+            var hasConnected = false
+            val retry = ReconnectBackoff()
+            try {
+                while (true) {
+                    _transportState.value = TransportState.CONNECTING
+                    if (bt.hasPermissions() && bt.enabled.value) {
+                        val target = bt.getDevice(device.address)
+                        if (target != null) {
+                            bt.stopScan()
+                            if (!bt.isBonded(device.address)) {
+                                log.add("Emparejando con ${device.name}.")
+                                if (!bt.ensureBonded(target)) break
+                                bt.refreshBonded()
+                            }
+                            val t = createTransport(mode)
+                            transport = t
+                            observeEvents(t)
+                            if (attemptConnect(t, target) && t.state.value == TransportState.CONNECTED) {
+                                retry.reset()
+                                hasConnected = true
+                                _connectedDevice.value = device.copy(bonded = true)
+                                _transportState.value = TransportState.CONNECTED
+                                state.reset()
+                                hub.start(t)
+                                updateSettings {
+                                    it.copy(lastDeviceAddress = device.address, lastDeviceName = device.name)
+                                }
+                                t.state.first { it != TransportState.CONNECTED }
+                                log.add("Enlace perdido con ${device.name}.")
+                            }
+                            closeTransport()
+                        }
+                    } else {
+                        log.add("Conexión pendiente: comprueba Bluetooth y los permisos.")
+                    }
+                    if (!settings.value.autoReconnect || (!hasConnected && retry.attempts >= 4)) break
+                    val wait = retry.nextDelayMs()
+                    log.add("Reintento con ${device.name} en ${wait / 1000} s.")
+                    delay(wait)
                 }
-                bt.refreshBonded()
+                _transportState.value = TransportState.FAILED
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.add("Conexión: ${e.message ?: e.javaClass.simpleName}")
+                _transportState.value = TransportState.FAILED
+            } finally {
+                closeTransport()
             }
-            _connectedDevice.value = device.copy(bonded = true)
-            updateSettings { it.copy(lastDeviceAddress = device.address, lastDeviceName = device.name) }
-            startTransport(target, device, retries = if (settings.value.autoReconnect) 4 else 0)
         }
     }
+
+    private suspend fun attemptConnect(t: Transport, target: BluetoothDevice): Boolean =
+        try {
+            t.connect(target)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.add("Fallo al conectar: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
 
     fun quickReconnect() {
         val last = settings.value.lastDeviceAddress ?: return
-        val name = settings.value.lastDeviceName ?: "PC"
-        connectTo(BtDeviceUi(name, last, bt.isBonded(last)))
+        connectTo(BtDeviceUi(settings.value.lastDeviceName ?: "PC", last, bt.isBonded(last)))
     }
 
     fun disconnect() {
-        viewModelScope.launch { disconnectInternal() }
+        passiveHidAllowed = false
+        requestedMode = null
+        replaceConnection {
+            closeTransport()
+            _transportState.value = TransportState.DISCONNECTED
+        }
     }
 
-    private suspend fun disconnectInternal() {
-        reconnectJob?.cancel()
-        reconnectJob = null
-        hub.stop()
+    private fun replaceConnection(block: suspend () -> Unit) {
+        connectionJob?.cancel()
+        connectionJob = viewModelScope.launch {
+            connectionLock.withLock { block() }
+        }
+    }
+
+    private fun createTransport(mode: TransportModeWire): Transport =
+        if (mode == TransportModeWire.HID) HidTransport(getApplication(), log)
+        else RfcommTransport(viewModelScope, bt, log, latency)
+
+    private suspend fun closeTransport() = withContext(NonCancellable) {
+        val old = transport
+        transport = null
         eventJob?.cancel()
         eventJob = null
-        transport?.close()
-        transport = null
-        _transportState.value = TransportState.DISCONNECTED
-        _connectedDevice.value = null
         state.reset()
+        hub.stopAndJoin()
+        if (old?.state?.value == TransportState.CONNECTED) {
+            // Si el enlace ya falló, Windows libera el mando al cerrarse el socket.
+            withTimeoutOrNull(350) { runCatching { old.releaseAll() } }
+        }
+        old?.close()
+        _connectedDevice.value = null
+        latency.reset()
     }
 
-    /** La UI avisa que ya hay permisos: reactiva la supervisión HID automática. */
-    fun notifyPermissionsGranted() = ensureHidMonitor()
+    fun notifyPermissionsGranted() {
+        bt.refreshBonded()
+        ensureHidMonitor()
+    }
 
-    /**
-     * Modo HID: crea el transporte y registra el servicio HID aunque el
-     * usuario no haya pulsado Conectar. Así, si el PC se conecta desde
-     * ajustes Bluetooth o desde Windows, el estado se actualiza solo.
-     */
     private fun ensureHidMonitor() {
-        if (transport != null) return
-        if (settings.value.transportMode != TransportModeWire.HID) return
-        if (bt.adapter?.isEnabled != true || !bt.hasPermissions()) return
-        val t = HidTransport(getApplication(), log)
-        transport = t
-        observeTransport(t)
-        _transportState.value = TransportState.DISCONNECTED
-        viewModelScope.launch { t.prepare() }
-        log.add("HID: supervisión automática activa; detecta al PC sin pulsar nada.")
-    }
-
-    private suspend fun startTransport(target: android.bluetooth.BluetoothDevice, ui: BtDeviceUi, retries: Int) {
-        val mode = settings.value.transportMode
-        val current = transport
-        val t: Transport = if (
-            mode == TransportModeWire.HID &&
-            current is HidTransport &&
-            current.state.value != TransportState.FAILED &&
-            (current.connectedAddress == null || current.connectedAddress == target.address)
-        ) {
-            // Reutiliza el servicio HID ya registrado (monitor): evita
-            // des-registrar y volver a registrar en cada intento.
-            log.add("Reutilizando el servicio HID ya registrado.")
-            current
-        } else {
-            disconnectInternal()
-            if (mode == TransportModeWire.HID) {
-                HidTransport(getApplication(), log)
-            } else {
-                RfcommTransport(viewModelScope, bt, log, latency)
+        if (connectionJob?.isActive == true || transport != null || !foreground || !passiveHidAllowed) return
+        if (settings.value.transportMode != TransportModeWire.HID || !bt.hasPermissions() || !bt.enabled.value) return
+        requestedMode = null
+        replaceConnection {
+            val hid = HidTransport(getApplication(), log)
+            transport = hid
+            observeEvents(hid)
+            try {
+                hid.prepare()
+                hid.state.collect { current ->
+                    _transportState.value = current
+                    state.reset()
+                    if (current == TransportState.CONNECTED) {
+                        val address = hid.connectedAddress.orEmpty()
+                        _connectedDevice.value = BtDeviceUi(hid.deviceName.value ?: "PC", address, true)
+                        if (!hub.isRunning) hub.start(hid)
+                    } else {
+                        hub.stopAndJoin()
+                        _connectedDevice.value = null
+                    }
+                }
+            } finally {
+                closeTransport()
             }
-        }
-        transport = t
-        observeTransport(t)
-        _transportState.value = TransportState.CONNECTING
-        var attempt = 0
-        var waitMs = 1000L
-        while (true) {
-            latency.reset()
-            state.reset()
-            val ok = t.connect(target)
-            if (ok) {
-                _transportState.value = TransportState.CONNECTED
-                state.reset()
-                if (!hub.isRunning) hub.start(t)
-                log.add("Modo mando activo (${mode}).")
-                return
-            }
-            attempt++
-            if (attempt > retries) {
-                _transportState.value = TransportState.FAILED
-                return
-            }
-            log.add("Reintento $attempt de $retries en ${waitMs / 1000} s...")
-            delay(waitMs)
-            waitMs = (waitMs * 2).coerceAtMost(8000L)
         }
     }
 
-    private fun observeTransport(t: Transport) {
+    private fun observeEvents(t: Transport) {
         eventJob?.cancel()
         eventJob = viewModelScope.launch {
-            launch {
-                t.state.collect { s ->
-                    _transportState.value = s
-                    when (s) {
-                        TransportState.CONNECTED -> {
-                            // La conexión puede llegar sola (HID): arrancar el envío.
-                            if (!hub.isRunning) {
-                                state.reset()
-                                hub.start(t)
-                            }
-                        }
-                        TransportState.DISCONNECTED, TransportState.FAILED -> {
-                            if (hub.isRunning) {
-                                hub.stop()
-                                state.reset()
-                            }
-                            _connectedDevice.value = null
-                        }
-                        TransportState.CONNECTING -> Unit
-                    }
-                }
-            }
-            launch {
-                t.deviceName.collect { name ->
-                    if (t.state.value == TransportState.CONNECTED && name != null) {
-                        _connectedDevice.value = BtDeviceUi(
-                            name,
-                            settings.value.lastDeviceAddress ?: "",
-                            true
-                        )
-                    }
-                }
-            }
-            launch {
-                t.events.collect { event ->
-                    when (event) {
-                        is TransportEvent.Rumble -> vibrate(event.small, event.large)
-                        is TransportEvent.RttMeasured -> Unit // el RTT ya vive en vm.latency.stats
-                        is TransportEvent.Info -> log.add(event.message)
-                        is TransportEvent.Failed -> {
-                            log.add("FALLO: ${event.message}")
-                            if (t.state.value != TransportState.CONNECTED) {
-                                _transportState.value = TransportState.FAILED
-                                hub.stop()
-                            }
-                        }
-                    }
+            t.events.collect { event ->
+                if (transport !== t) return@collect
+                when (event) {
+                    is TransportEvent.Rumble -> vibrate(event.small, event.large)
+                    TransportEvent.ReleaseInputs -> state.reset()
+                    is TransportEvent.Info -> log.add(event.message)
+                    is TransportEvent.Failed -> log.add("FALLO: ${event.message}")
                 }
             }
         }
     }
 
-    // ---------------------------------------------------------- ciclo de vida
-
-    /** Pausa del modo mando: libera el estado para no dejar botones pegados. */
     fun pauseGamepad() {
-        state.reset()
-        viewModelScope.launch {
-            transport?.releaseAll()
-        }
-        hub.stop()
+        gamepadVisible = false
+        updateHubControls()
     }
 
     fun resumeGamepad() {
-        val t = transport ?: return
-        if (t.state.value == TransportState.CONNECTED && !hub.isRunning) {
-            hub.start(t)
+        gamepadVisible = true
+        updateHubControls()
+    }
+
+    fun setForeground(active: Boolean) {
+        foreground = active
+        updateHubControls()
+        if (active && requestedMode == null && transport is HidTransport &&
+            transport?.state?.value == TransportState.FAILED
+        ) {
+            replaceConnection {
+                closeTransport()
+                _transportState.value = TransportState.DISCONNECTED
+            }
+            connectionJob?.invokeOnCompletion { viewModelScope.launch { ensureHidMonitor() } }
+        } else if (active) {
+            ensureHidMonitor()
         }
+    }
+
+    private fun updateHubControls() {
+        hub.controlsActive = gamepadVisible && foreground
+        if (!hub.controlsActive) state.reset()
     }
 
     private fun vibrate(small: Int, large: Int) {
@@ -326,10 +347,8 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
         gyro.setEnabled(false)
         battery.dispose()
         bt.dispose()
-        viewModelScope.launch {
-            transport?.close()
-            transport = null
-        }
+        transport?.close()
+        transport = null
         super.onCleared()
     }
 }

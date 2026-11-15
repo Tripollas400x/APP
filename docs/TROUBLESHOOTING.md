@@ -25,7 +25,7 @@ Síntoma: la app del teléfono dice "conectando" y no termina.
 
 Síntoma: se conecta y se desconecta en segundos.
 
-- Verifica que no haya otro teléfono conectado al receptor (v0.1 acepta una conexión).
+- Verifica que no haya otro teléfono conectado al receptor (el receptor acepta una sesión activa).
 - Acerca el teléfono al PC; los adaptadores BT de bajo consumo sufren con paredes.
 
 ## 4. Método A (HID directo)
@@ -42,32 +42,30 @@ Síntoma: se conecta y se desconecta en segundos.
 
 ## 6. Latencia o cortes
 
-- Sube la frecuencia de envío en Ajustes (por defecto 120 Hz) y observa el RTT en Diagnóstico.
+- Prueba primero a 60 Hz. Repite a 120 Hz con el mismo equipo y compara RTT, pausas entre INPUT y failsafes.
 - Desactiva el ahorro de batería de ColorOS para Phantom Pad (Ajustes -> Batería -> sin optimización). ColorOS mata conexiones en segundo plano agresivamente.
 - Mantén la pantalla del modo mando encendida (la app lo hace automáticamente si la opción está activa).
 
 ## 7. Botones que quedan pegados
 
-- El receptor libera todo si deja de recibir tramas durante 1 segundo (failsafe).
+- El receptor libera todo si deja de recibir INPUT válido durante 1 segundo (failsafe).
 - Si pasa con la pantalla encendida, avísanos con el log de Diagnóstico: es un bug que queremos ver.
 
-## 8. Nuevas herramientas de diagnóstico (v0.2.1)
+## 8. Diagnóstico del receptor
 
 - El receptor Windows registra cada paso con `[BT] ...`: adaptador, servicio, SDP, listener y publicación. Si algo falla, el log muestra el tipo de excepción, el mensaje real y el HRESULT (0x800710DF = Bluetooth apagado, 0x80070490 = elemento no encontrado...). Usa el botón "Guardar registro..." para adjuntarlo a un reporte.
-- Botón **Prueba local (joy.cpl)**: con el receptor iniciado, barre ejes, gatillos y botones del mando virtual SIN teléfono. Si joy.cpl muestra el barrido, el mando virtual está bien y el problema está en el Bluetooth; si no lo muestra, el problema es de ViGEmBus/driver.
+- Botón **Prueba local (joy.cpl)**: con el receptor iniciado, barre ejes, gatillos y botones del mando virtual SIN teléfono. Observa si los controles se mueven en la pestaña de propiedades y si el panel indica «entrada comprobada» en Xbox 360.
 - App: Diagnóstico muestra ahora adaptador, permisos, escaneo, emparejados, UUID del servicio y frames enviados; el registro completo se copia con un botón.
 
-## 9. Xbox 360: "índice del jugador pendiente"
+## 9. Xbox 360, índice sin asignar y mandos repetidos
 
-`Xbox360UserIndexNotReportedException` no es un error de creación: el índice
-llega asíncronamente cuando Windows termina de enumerar el mando virtual. En
-v0.2.1 el receptor ya NO destruye el mando por eso: muestra "índice pendiente"
-y el mando queda operativo. Comprobaciones si el índice nunca llega:
+El callback de ViGEm puede entregar 255 mientras Windows asigna el slot. XInput admite 0–3. El panel muestra el resultado de cada consulta (0 = responde, 1167 = desconectado). La prueba local puede atribuir un slot aunque el callback siga indicando 255, si solo un slot reproduce los informes del barrido.
 
-- Abre `joy.cpl`: si el mando aparece con estado OK, todo funciona.
-- Cierra DS4Windows, reWASD, x360ce o cualquier otra app con mandos virtuales.
-- Reinstala ViGEmBus (https://vigem.org/downloads/) y reinicia el PC.
-- El fallback a DualShock 4 solo ocurre si el plug de Xbox 360 falla de verdad.
+1. Desconecta el teléfono, detén el receptor y anota los mandos que siguen en `joy.cpl`.
+2. Inicia el receptor en Xbox 360 y vuelve a abrir `joy.cpl`. Usa **Prueba local** para reconocer qué mando reproduce el barrido.
+3. Detén el receptor y comprueba qué mando desaparece. Si quedan otros, identifica el programa o dispositivo propietario antes de cambiarlo.
+4. Si queda una entrada que reconoces de una sesión previa, consulta su Id. de instancia y su dispositivo padre en Administrador de dispositivos. Cierra primero la aplicación propietaria. Si está desconectada y aparece como entrada oculta, elimina únicamente esa instancia identificada.
+5. Si XInput reconoce el mando y el navegador no lo lista, abre Gamepad Tester con la pestaña enfocada y pulsa un botón. Contrasta el resultado con un juego XInput.
 
 ## 10. El receptor muestra un error de Bluetooth
 
@@ -81,3 +79,12 @@ y el mando queda operativo. Comprobaciones si el índice nunca llega:
 - Mira el registro: ahora cada intento (seguro / sin cifrado) deja el motivo real del fallo y el timeout es de 12 s por intento.
 - La app cancela el descubrimiento Bluetooth antes de conectar; si el escaneo está en marcha en ajustes del sistema, ciérralo.
 - Confirma que el UUID del servicio coincide (ver Diagnóstico: UUID servicio = 8e6f4d2a-1b3c-4e5f-9a7d-2c3b4a5d6e7f).
+
+## 12. Prueba en OPPO A60 y Windows 10/11
+
+- Actualiza primero el receptor y después el APK. Registra la versión del sistema, versión de ViGEmBus y modo del mando.
+- Ejecuta **Prueba local** con el teléfono desconectado. Verifica ejes, gatillos y botones en `joy.cpl`, el slot de XInput y que el target se libera al detener.
+- Conecta por RFCOMM. Ejecuta una sesión de cinco minutos a 60 Hz y repite a 120 Hz. Registra RTT promedio en Android, pausa máxima y failsafes en Windows. Prueba botones simultáneos y diagonales.
+- Con un botón pulsado, corta Bluetooth. Comprueba que se libera el mando y mide la recuperación tras reactivar Bluetooth. Repite pulsando **Desconectar** durante el reintento. En Windows prueba **Detener** mientras el servicio está reintentando.
+- En HID directo, mantén Phantom Pad en primer plano, selecciona el PC y verifica el mando HID genérico en `joy.cpl`. Si el sistema retira o rechaza el perfil, guarda el evento exacto y la versión de ColorOS.
+- La causa concreta de otros mandos instalados, el RTT después del arreglo y las políticas de ColorOS se verifican con el hardware.

@@ -25,310 +25,193 @@ public sealed class VirtualPadException : Exception
     public VirtualPadException(string message, Exception? inner = null) : base(message, inner) { }
 }
 
-/// <summary>
-/// Mando virtual sobre ViGEmBus. Modo Xbox 360 (XInput, recomendado) y modo
-/// DualShock 4.
-///
-/// COMPORTAMIENTO VERIFICADO de Nefarius.ViGEm.Client 1.21.256 (decompilado):
-///   - Connect() = vigem_target_add (plug) + registro de la notificación.
-///     Devuelve cuando el BUS acepta el plug, no cuando Windows termina de
-///     enumerar el dispositivo.
-///   - UserIndex SOLO se asigna cuando el bus envía su primera notificación
-///     (asíncrona; ocurre cuando el host XUSB de Windows inicializa el mando).
-///     Leer UserIndex antes de eso lanza Xbox360UserIndexNotReportedException.
-///
-/// Por eso aquí la creación, la conexión y la consulta del índice están
-/// SEPARADAS: si Connect() no lanza, el mando queda enchufado y operativo
-/// aunque el índice tarde; el índice se consulta en segundo plano de forma
-/// tolerante ("Índice pendiente") y NUNCA se destruye el mando por una
-/// consulta prematura. El fallback a DS4 solo ocurre si Connect() falla de
-/// verdad (bus no encontrado, sin hueco, etc.).
-///
-/// Con la API 1.21.x las clases concretas son internas (solo se exponen
-/// IXbox360Controller/IDualShock4Controller) y cada llamada Set* concreta
-/// reenvía el informe al bus (AutoSubmitReport interno = true). Para no
-/// martillear el driver con un envío por cada campo, este componente escribe
-/// el informe completo mediante las propiedades `ref` y los setters en lote
-/// (SetButtonsFull / SetSpecialButtonsFull, que NO reenvían) y provoca
-/// exactamente UN envío nativo por frame de entrada.
-/// </summary>
+public enum ControllerState
+{
+    NotInitialized, ConnectingToBus, BusConnected, WindowsEnumerating,
+    InputReady, Degraded, Failed, Disposed
+}
+
+/// <summary>Mando ViGEm. El motor serializa creación, entrada, sondeo y liberación.</summary>
 public sealed class VirtualController : IDisposable
 {
     private ViGEmClient? _client;
     private IXbox360Controller? _xbox;
     private IDualShock4Controller? _ds4;
-    private System.Threading.Timer? _indexTimer;
+    private XInputReport _lastReport;
+    private int _correlatedIndex = -1;
+    private int _verifiedIndex = -1;
+    private bool _wasVerified;
 
-    private const int MaxAttempts = 3;
-    private const int RetryDelayMs = 400;
-    private const int IndexPollFirstMs = 300;
-    private const int IndexPollPeriodMs = 500;
-    private const int IndexPollMax = 120; // 60 s de sondeo; luego deja de avisar
-
-    /// <summary>Avisos de progreso (reintentos, fallback) para el registro.</summary>
     public event Action<string>? Status;
-
-    /// <summary>Rumble del juego (motor pequeño, motor grande), ambos modos.</summary>
     public event Action<byte, byte>? RumbleRequested;
 
     public PadMode Mode { get; }
-
-    /// <summary>true si el modo pedido era Xbox 360 pero solo respondió DS4.</summary>
-    public bool FellBackToDs4 { get; private set; }
-
-    /// <summary>
-    /// Índice del jugador reportado por el bus, o -1 si aún no llegó o el modo
-    /// DS4 no lo expone. NO lanza excepciones nunca.
-    /// </summary>
+    public PadMode EffectiveMode => _ds4 != null ? PadMode.DualShock4 : Mode;
+    public ControllerState State { get; private set; }
+    public bool HasTarget => _xbox != null || _ds4 != null;
+    public int RawUserIndex { get; private set; } = -1;
     public int UserIndex { get; private set; } = -1;
+    public string XInputStatus { get; private set; } = "pendiente";
+    public string Identity => HasTarget
+        ? EffectiveMode == PadMode.Xbox360 ? "Xbox 360 · VID:PID 045E:028E" : "DualShock 4 · VID:PID 054C:05C4"
+        : "—";
 
-    /// <summary>true mientras el índice Xbox 360 todavía no ha sido reportado.</summary>
-    public bool UserIndexPending { get; private set; }
+    public VirtualController(PadMode mode) => Mode = mode;
 
-    public bool Ready => _xbox != null || _ds4 != null;
-
-    public VirtualController(PadMode mode)
+    public static bool DriverInstalled
     {
-        Mode = mode;
+        get
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus");
+            return key != null;
+        }
     }
-
-    /// <summary>El servicio ViGEmBus existe en el sistema (driver instalado).</summary>
-    public static bool DriverInstalled =>
-        Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus") != null;
 
     public void Start()
     {
-        var errors = new List<string>();
+        ObjectDisposedException.ThrowIf(State == ControllerState.Disposed, this);
+        if (HasTarget) return;
 
-        if (Mode == PadMode.Xbox360)
+        State = ControllerState.ConnectingToBus;
+        try
         {
-            if (TryStartXbox360(errors))
+            if (Mode == PadMode.Xbox360)
             {
-                return;
+                try
+                {
+                    ConnectTarget(Mode);
+                }
+                catch (Exception ex)
+                {
+                    Status?.Invoke("Xbox 360: " + Bluetooth.RfcommServer.Detail(ex) + ". Probando DualShock 4.");
+                    ConnectTarget(PadMode.DualShock4);
+                }
             }
-
-            // Fallback SOLO si el plug de Xbox 360 falló de verdad en todos los
-            // intentos (no por una consulta de índice).
-            Status?.Invoke(
-                "Xbox 360 no pudo enchufarse tras " + MaxAttempts + " intentos; probando DualShock 4..."
-            );
-            ResetPads();
-            if (TryStartDualShock4(errors))
+            else
             {
-                FellBackToDs4 = true;
-                return;
+                ConnectTarget(Mode);
+            }
+            State = ControllerState.BusConnected;
+            Status?.Invoke($"{EffectiveMode} registrado en ViGEm. Verificando entrada en Windows.");
+        }
+        catch (Exception ex)
+        {
+            State = ControllerState.Failed;
+            throw new VirtualPadException(
+                (DriverInstalled ? "ViGEmBus instalado. " : "ViGEmBus no detectado. ") +
+                Bluetooth.RfcommServer.Detail(ex), ex);
+        }
+    }
+
+    private void ConnectTarget(PadMode mode)
+    {
+        ViGEmClient? client = null;
+        IXbox360Controller? xbox = null;
+        IDualShock4Controller? ds4 = null;
+        try
+        {
+            client = new ViGEmClient();
+            if (mode == PadMode.Xbox360)
+            {
+                xbox = client.CreateXbox360Controller();
+                xbox.FeedbackReceived += OnXboxFeedback;
+                xbox.AutoSubmitReport = false;
+                xbox.Connect();
+            }
+            else
+            {
+                ds4 = client.CreateDualShock4Controller();
+#pragma warning disable CS0618
+                ds4.FeedbackReceived += OnDualShock4Feedback;
+#pragma warning restore CS0618
+                ds4.AutoSubmitReport = false;
+                ds4.Connect();
             }
         }
-        else if (TryStartDualShock4(errors))
+        catch
         {
+            // Connect puede enchufar el target y luego fallar al registrar sus callbacks.
+            Cleanup(client, xbox, ds4);
+            throw;
+        }
+        _client = client;
+        _xbox = xbox;
+        _ds4 = ds4;
+    }
+
+    public void ProbeXInput()
+    {
+        if (_xbox == null)
+        {
+            if (_ds4 != null) XInputStatus = "DS4/HID: comprueba la entrada en joy.cpl";
             return;
         }
 
-        throw new VirtualPadException(BuildFailureMessage(errors));
-    }
+        try { RawUserIndex = _xbox.UserIndex; }
+        catch (Xbox360UserIndexNotReportedException) { RawUserIndex = -1; }
 
-    private bool TryStartXbox360(List<string> errors)
-    {
-        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        var slots = XInput.Scan();
+        int index = XInput.IsPlayerIndex(RawUserIndex) ? RawUserIndex : _correlatedIndex;
+        if (XInput.IsPlayerIndex(index) && !slots[index].Connected)
         {
-            try
-            {
-                var client = new ViGEmClient();
-                IXbox360Controller? pad = null;
-                try
-                {
-                    pad = client.CreateXbox360Controller();
-                    pad.FeedbackReceived += OnXboxFeedback;
-                    // Único punto de fallo duro: si esto no lanza, el mando
-                    // está ENCHUFADO en el bus y operativo.
-                    pad.Connect();
-                }
-                catch
-                {
-                    if (pad != null) pad.FeedbackReceived -= OnXboxFeedback;
-                    client.Dispose();
-                    throw;
-                }
-                _client = client;
-                _xbox = pad;
-                UserIndex = -1;
-                UserIndexPending = true;
-                Status?.Invoke(
-                    "Xbox 360 enchufado en el bus ViGEm (intento " + attempt + "). " +
-                    "Esperando el índice del jugador (llega asíncronamente)..."
-                );
-                StartIndexPoll();
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errors.Add(Describe(attempt, "Xbox360", ex));
-                ResetPads();
-                if (attempt < MaxAttempts)
-                {
-                    Status?.Invoke(
-                        "Intento " + attempt + "/" + MaxAttempts + " de Xbox 360 falló (" +
-                        DescribeShort(ex) + "); reintentando en " + RetryDelayMs + " ms..."
-                    );
-                    Thread.Sleep(RetryDelayMs);
-                }
-            }
+            _verifiedIndex = -1;
+            _correlatedIndex = -1;
         }
-        return false;
-    }
-
-    private bool TryStartDualShock4(List<string> errors)
-    {
-        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        UserIndex = XInput.IsPlayerIndex(index) && slots[index].Connected ? index : -1;
+        if (UserIndex != _verifiedIndex) _verifiedIndex = -1;
+        if (UserIndex == RawUserIndex && UserIndex >= 0 &&
+            _lastReport != default && slots[index].Report.WithoutGuide() == _lastReport)
         {
-            try
-            {
-                var client = new ViGEmClient();
-                IDualShock4Controller? pad = null;
-                try
-                {
-                    pad = client.CreateDualShock4Controller();
-#pragma warning disable CS0618
-                    // Evento marcado obsoleto por el autor de la librería ("puede no
-                    // comportarse como se espera"); la alternativa oficial exige un
-                    // hilo bloqueado en AwaitRawOutputReport() y parsear el informe
-                    // crudo. Se deja como mejor esfuerzo: el rumble garantizado está
-                    // en modo Xbox 360. Limitación documentada en el README.
-                    pad.FeedbackReceived += OnDualShock4Feedback;
-#pragma warning restore CS0618
-                    pad.Connect();
-                }
-                catch
-                {
-                    if (pad != null)
-                    {
-#pragma warning disable CS0618
-                        pad.FeedbackReceived -= OnDualShock4Feedback;
-#pragma warning restore CS0618
-                    }
-                    client.Dispose();
-                    throw;
-                }
-                _client = client;
-                _ds4 = pad;
-                UserIndex = -1;
-                UserIndexPending = false;
-                Status?.Invoke("DualShock 4 enchufado en el bus ViGEm (intento " + attempt + ").");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                errors.Add(Describe(attempt, "DualShock4", ex));
-                ResetPads();
-                if (attempt < MaxAttempts)
-                {
-                    Thread.Sleep(RetryDelayMs);
-                }
-            }
+            _verifiedIndex = index;
         }
-        return false;
-    }
 
-    /// <summary>
-    /// Sondeo tolerante del índice del jugador: consulta UserIndex cada 500 ms
-    /// atrapando la excepción "no reportado". NUNCA destruye ni recrea el
-    /// mando; solo informa. El mando funciona igual mientras el índice llegue
-    /// (los informes se envían por el handle del target, no por el índice).
-    /// </summary>
-    private void StartIndexPoll()
-    {
-        StopIndexPoll();
-        int polls = 0;
-        _indexTimer = new System.Threading.Timer(_ =>
+        string results = string.Join(" ", slots.Select((slot, i) => $"{i}={slot.Result}"));
+        string attribution = UserIndex < 0 ? "sin atribuir" :
+            UserIndex == RawUserIndex ? $"ViGEm #{UserIndex}" : $"prueba local #{UserIndex}";
+        XInputStatus = $"GetState {results} · {attribution}";
+        if (_verifiedIndex >= 0)
         {
-            var pad = _xbox;
-            if (pad == null || !UserIndexPending)
-            {
-                StopIndexPoll();
-                return;
-            }
-            try
-            {
-                int idx = pad.UserIndex; // lanza Xbox360UserIndexNotReportedException si aún no llegó
-                UserIndex = idx;
-                UserIndexPending = false;
-                Status?.Invoke("Índice del jugador Xbox 360 reportado por el bus: " + idx + ".");
-                StopIndexPoll();
-            }
-            catch (Xbox360UserIndexNotReportedException)
-            {
-                polls++;
-                if (polls == 1 || polls % 8 == 0)
-                {
-                    Status?.Invoke(
-                        "Índice del jugador pendiente (" + polls + " consultas): el mando ya está " +
-                        "enchufado y operativo; Windows lo inicializará en cuanto el host XUSB lo enumere " +
-                        "(mira joy.cpl). No hace falta reintentar."
-                    );
-                }
-                if (polls >= IndexPollMax)
-                {
-                    Status?.Invoke(
-                        "El bus no reportó el índice del jugador en 60 s (el mando sigue enchufado). " +
-                        "Si joy.cpl no lo muestra, cierra DS4Windows/reWASD/x360ce o reinstala ViGEmBus."
-                    );
-                    StopIndexPoll();
-                }
-            }
-            catch
-            {
-                // el target se destruyó (Stop/Dispose): cortar el sondeo sin ruido
-                StopIndexPoll();
-            }
-        }, null, IndexPollFirstMs, IndexPollPeriodMs);
+            _wasVerified = true;
+            State = ControllerState.InputReady;
+        }
+        else
+        {
+            State = _wasVerified ? ControllerState.Degraded :
+                UserIndex >= 0 ? ControllerState.BusConnected : ControllerState.WindowsEnumerating;
+        }
     }
 
-    private void StopIndexPoll()
+    internal void SampleLocalTest(XInputCorrelation correlation)
     {
-        _indexTimer?.Dispose();
-        _indexTimer = null;
+        if (_xbox != null) correlation.Observe(_lastReport, XInput.Scan());
     }
 
-    private void ResetPads()
+    internal void CompleteLocalTest(XInputCorrelation correlation)
     {
-        StopIndexPoll();
-        try { _xbox?.Disconnect(); } catch { /* driver puede ya no estar */ }
-        try { _ds4?.Disconnect(); } catch { /* idem */ }
-        _xbox = null;
-        _ds4 = null;
-        try { _client?.Dispose(); } catch { }
-        _client = null;
-        UserIndex = -1;
-        UserIndexPending = false;
+        int index = correlation.VerifiedIndex;
+        if (_xbox == null || !XInput.IsPlayerIndex(index)) return;
+        if (XInput.IsPlayerIndex(RawUserIndex) && RawUserIndex != index) return;
+        _correlatedIndex = index;
+        _verifiedIndex = index;
+        ProbeXInput();
     }
 
-    /// <summary>Tipo + mensaje (o "(sin mensaje)") + HRESULT si es relevante.</summary>
-    private static string DescribeShort(Exception ex)
+    private void Cleanup(ViGEmClient? client, IXbox360Controller? xbox, IDualShock4Controller? ds4)
     {
-        string msg = string.IsNullOrWhiteSpace(ex.Message) ? "(sin mensaje)" : ex.Message;
-        string hr = ex.HResult != 0 ? $" (HRESULT 0x{ex.HResult:X8})" : "";
-        return $"{ex.GetType().Name}: {msg}{hr}";
+        if (xbox != null) xbox.FeedbackReceived -= OnXboxFeedback;
+#pragma warning disable CS0618
+        if (ds4 != null) ds4.FeedbackReceived -= OnDualShock4Feedback;
+#pragma warning restore CS0618
+        IVirtualGamepad? pad = xbox as IVirtualGamepad ?? ds4;
+        if (pad != null) TryCleanup(pad.Disconnect);
+        if (pad is IDisposable target) TryCleanup(target.Dispose);
+        if (client != null) TryCleanup(client.Dispose);
     }
 
-    private static string Describe(int attempt, string target, Exception ex)
-        => $"{target} intento {attempt}: {DescribeShort(ex)}\n  en {FirstStackLine(ex)}";
-
-    private static string FirstStackLine(Exception ex)
+    private void TryCleanup(Action action)
     {
-        var lines = (ex.StackTrace ?? "").Split('\n');
-        return lines.Length > 0 ? lines[0].Trim() : "(sin stack)";
-    }
-
-    private static string BuildFailureMessage(List<string> errors)
-    {
-        string detail = string.Join(" | ", errors.TakeLast(3));
-        return DriverInstalled
-            ? "El driver ViGEmBus está instalado pero el bus no aceptó ningún mando. " +
-              "Cierra apps que también crean mandos virtuales (DS4Windows, reWASD, x360ce), " +
-              "y si sigue igual reinstala ViGEmBus desde https://vigem.org/downloads/ y reinicia. " +
-              "Detalles: " + detail
-            : "El driver ViGEmBus NO está instalado. Descárgalo de https://vigem.org/downloads/, " +
-              "instálalo y reinicia el PC. Detalles: " + detail;
+        try { action(); }
+        catch (Exception ex) { Status?.Invoke("ViGEm limpieza: " + Bluetooth.RfcommServer.Detail(ex)); }
     }
 
     private void OnXboxFeedback(object sender, Xbox360FeedbackReceivedEventArgs e)
@@ -345,7 +228,7 @@ public sealed class VirtualController : IDisposable
     {
         if (_xbox != null)
         {
-            ApplyXbox(_xbox, f);
+            _lastReport = ApplyXbox(_xbox, f).WithoutGuide();
         }
         else if (_ds4 != null)
         {
@@ -374,7 +257,7 @@ public sealed class VirtualController : IDisposable
     /// en XInput, "arriba" es positivo.</summary>
     private static short AxisY(sbyte v) => v == -128 ? short.MaxValue : (short)(-v * 257);
 
-    private static void ApplyXbox(IXbox360Controller p, in InputFrame f)
+    private static XInputReport ApplyXbox(IXbox360Controller p, in InputFrame f)
     {
         // Escrituras directas en el informe nativo (sin envío).
         p.LeftThumbX = AxisX(f.LX);
@@ -402,9 +285,8 @@ public sealed class VirtualController : IDisposable
         if (f.Buttons.HasFlag(PadButtons.Ps)) buttons |= Xbox360Button.Guide.Value;
         p.ButtonState = buttons; // escritura en lote, sin envío
 
-        // Único envío nativo del frame: SetAxisValue dispara el auto-submit
-        // interno con el informe ya completo (valor idempotente).
-        p.SetAxisValue(Xbox360Axis.LeftThumbX, AxisX(f.LX));
+        p.SubmitReport();
+        return new(buttons, f.L2, f.R2, p.LeftThumbX, p.LeftThumbY, p.RightThumbX, p.RightThumbY);
     }
 
     // ------------------------------------------------------------- DualShock 4
@@ -438,9 +320,8 @@ public sealed class VirtualController : IDisposable
         if (f.Buttons.HasFlag(PadButtons.Touchpad)) special |= (byte)DualShock4SpecialButton.Touchpad.Value;
         p.SetSpecialButtonsFull(special); // escritura en lote, sin envío
 
-        // Único envío nativo del frame: SetDPadDirection arregla el nibble del
-        // D-pad (0 = Norte en DS4, por eso va al final) y dispara el auto-submit.
         p.SetDPadDirection(DPadDirection(f));
+        p.SubmitReport();
     }
 
     private static DualShock4DPadDirection DPadDirection(in InputFrame f)
@@ -462,6 +343,11 @@ public sealed class VirtualController : IDisposable
 
     public void Dispose()
     {
-        ResetPads();
+        if (State == ControllerState.Disposed) return;
+        State = ControllerState.Disposed;
+        Cleanup(_client, _xbox, _ds4);
+        _xbox = null;
+        _ds4 = null;
+        _client = null;
     }
 }

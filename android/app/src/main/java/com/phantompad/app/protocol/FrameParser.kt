@@ -6,7 +6,7 @@ package com.phantompad.app.protocol
  *  - frames fragmentados en varias lecturas del socket,
  *  - varios frames llegando juntos en una lectura,
  *  - bytes basura delante,
- *  - frames con CRC inválido (se descartan enteros y se cuenta el rechazo),
+ *  - frames con CRC inválido (se cuenta el rechazo y se busca la próxima cabecera),
  *  - tipos desconocidos (no se sabe su longitud: se resincroniza byte a byte).
  *
  * Uso: append() con lo que llegue del stream y next() hasta que devuelva
@@ -51,7 +51,7 @@ class FrameParser {
                 buf[1] != PhantomProtocol.MAGIC1.toByte() ||
                 buf[2] != PhantomProtocol.PROTOCOL_VERSION.toByte()
             ) {
-                drop(1) // basura delante: resincronizar byte a byte
+                consume(1, discarded = true) // basura delante: resincronizar byte a byte
                 continue
             }
 
@@ -64,25 +64,25 @@ class FrameParser {
                 else -> 0
             }
             if (expected == 0) {
-                drop(1) // tipo desconocido: longitud desconocida, resincronizar
+                consume(1, discarded = true) // tipo desconocido: longitud desconocida, resincronizar
                 continue
             }
             if (len < expected) return null // frame a medias: esperar más bytes
 
             if (PhantomProtocol.crc8(buf, 0, expected - 1) != (buf[expected - 1].toInt() and 0xFF)) {
                 rejectedFrames++
-                drop(expected) // frame corrupto completo fuera
+                consume(1, discarded = true) // Recuperar aunque falte un byte.
                 continue
             }
 
             val out = buf.copyOf(expected)
-            drop(expected)
+            consume(expected)
             return Frame(type, out)
         }
     }
 
-    private fun drop(count: Int) {
-        droppedBytes += count
+    private fun consume(count: Int, discarded: Boolean = false) {
+        if (discarded) droppedBytes += count
         System.arraycopy(buf, count, buf, 0, len - count)
         len -= count
     }
