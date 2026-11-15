@@ -4,6 +4,13 @@ Todas las cambios notables de este proyecto se documentan aquí.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.3.0] - 2026-11-15 — UI Revolution
+
+- Pantalla de juego inmersiva con carcasa blanca y negra, símbolos PlayStation en color, joysticks grandes, flechas de la cruceta y gatillos con indicador de recorrido.
+- Classic, FPS Pro y Racing tienen distribuciones nuevas. Los perfiles personalizados anteriores conservan su posición, escala, opacidad y geometría hasta restablecerlos.
+- El editor separa la vista previa de la entrada del juego y permite editar L3 y R3. Bienvenida, conexión, ajustes y diagnóstico se adaptan al formato horizontal.
+- Windows reorganiza el estado, el mando en vivo, el diagnóstico y el registro. La prueba local, los detalles técnicos y la exportación siguen disponibles.
+
 ## [0.2.2] - 2026-11-15 — Recuperación de conexión y mando
 
 - Windows procesa lecturas RFCOMM parciales y publica pausas, RTT, caudal, secuencias y contadores completos del parser.

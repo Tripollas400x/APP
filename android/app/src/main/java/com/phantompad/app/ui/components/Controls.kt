@@ -12,18 +12,23 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -32,15 +37,17 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.phantompad.app.protocol.ButtonId
 import com.phantompad.app.ui.theme.Accent
 import com.phantompad.app.ui.theme.BorderGlow
+import com.phantompad.app.ui.theme.DeepBlack
 import com.phantompad.app.ui.theme.CircRed
 import com.phantompad.app.ui.theme.CrossBlue
 import com.phantompad.app.ui.theme.SqPink
-import com.phantompad.app.ui.theme.SurfaceElevated
 import com.phantompad.app.ui.theme.TextPrimary
 import com.phantompad.app.ui.theme.TextSecondary
 import com.phantompad.app.ui.theme.TriGreen
@@ -54,42 +61,41 @@ fun HoldButton(
     onChange: (Boolean) -> Unit,
     hapticsEnabled: Boolean,
     modifier: Modifier = Modifier,
+    interactive: Boolean = true,
     content: @Composable BoxScope.(pressed: Boolean) -> Unit
 ) {
     var pressed by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
-    Box(
-        modifier = modifier
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    pressed = true
-                    onChange(true)
-                    if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    down.consume()
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.changedToUp()) break
-                        val inside = change.position.x in 0f..size.width.toFloat() &&
-                            change.position.y in 0f..size.height.toFloat()
-                        if (!inside) break
-                        change.consume()
-                    }
-                    pressed = false
-                    onChange(false)
+    val changeState by rememberUpdatedState(onChange)
+    val gesture = if (interactive) Modifier.pointerInput(hapticsEnabled) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            pressed = true
+            try {
+                changeState(true)
+                if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                down.consume()
+                while (true) {
+                    val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (change.changedToUp()) break
+                    if (change.position.x !in 0f..size.width.toFloat() ||
+                        change.position.y !in 0f..size.height.toFloat()
+                    ) break
+                    change.consume()
                 }
+            } finally {
+                pressed = false
+                changeState(false)
             }
-    ) {
+        }
+    } else Modifier
+    Box(modifier.then(gesture)) {
         val scale by animateFloatAsState(
-            targetValue = if (pressed) 0.9f else 1f,
+            targetValue = if (pressed) .93f else 1f,
+            animationSpec = tween(if (pressed) 70 else 110),
             label = "holdScale"
         )
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer { scaleX = scale; scaleY = scale }
-        ) {
+        Box(Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale }) {
             content(pressed)
         }
     }
@@ -97,11 +103,11 @@ fun HoldButton(
 
 // ----------------------------------------------------------- botones de acción
 
-enum class FaceStyle(val color: Color) {
-    TRIANGLE(TriGreen),
-    CIRCLE(CircRed),
-    CROSS(CrossBlue),
-    SQUARE(SqPink)
+enum class FaceStyle(val color: Color, val label: String) {
+    TRIANGLE(TriGreen, "Triángulo"),
+    CIRCLE(CircRed, "Círculo"),
+    CROSS(CrossBlue, "Cruz"),
+    SQUARE(SqPink, "Cuadrado")
 }
 
 @Composable
@@ -111,13 +117,16 @@ fun FaceButton(
     opacity: Float,
     hapticsEnabled: Boolean,
     onChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     HoldButton(
         onChange = onChange,
         hapticsEnabled = hapticsEnabled,
+        interactive = interactive,
         modifier = modifier
             .size(side)
+            .semantics { contentDescription = style.label }
             .graphicsLayer { alpha = opacity }
     ) { pressed ->
         Canvas(Modifier.fillMaxSize()) {
@@ -126,28 +135,18 @@ fun FaceButton(
     }
 }
 
-private fun DrawScope.drawFace(style: FaceStyle, pressed: Boolean) {
+internal fun DrawScope.drawFace(style: FaceStyle, pressed: Boolean) {
     val c = center
-    val r = size.minDimension * 0.32f
-    val stroke = 3.dp.toPx()
-    if (pressed) {
-        drawCircle(
-            color = style.color.copy(alpha = 0.18f),
-            radius = r * 1.65f,
-            center = c
-        )
-    }
+    val r = size.minDimension * .42f
+    val stroke = (size.minDimension * .043f).coerceIn(1.3.dp.toPx(), 3.dp.toPx())
+    val trim = if (pressed) style.color else Color(0xFF65656A)
+    drawCircle(Color.Black.copy(alpha = .24f), r * 1.07f, c + Offset(0f, r * .11f))
     drawCircle(
-        color = Color.White.copy(alpha = if (pressed) 0.10f else 0.06f),
-        radius = r * 1.35f,
-        center = c
+        Brush.verticalGradient(listOf(Color(0xFF444447), Color(0xFF121213)), c.y - r, c.y + r),
+        r, c
     )
-    drawCircle(
-        color = style.color.copy(alpha = if (pressed) 1f else 0.85f),
-        radius = r * 1.35f,
-        center = c,
-        style = Stroke(stroke)
-    )
+    drawCircle(trim, r, c, style = Stroke(if (pressed) 2.dp.toPx() else 1.dp.toPx()))
+    drawCircle(Color.White.copy(alpha = .13f), r * .82f, c, style = Stroke(1.dp.toPx()))
     when (style) {
         FaceStyle.TRIANGLE -> {
             val path = Path()
@@ -163,8 +162,8 @@ private fun DrawScope.drawFace(style: FaceStyle, pressed: Boolean) {
         }
         FaceStyle.CROSS -> {
             val d = r * 0.42f
-            drawLine(style.color, Offset(c.x - d, c.y - d), Offset(c.x + d, c.y + d), stroke)
-            drawLine(style.color, Offset(c.x - d, c.y + d), Offset(c.x + d, c.y - d), stroke)
+            drawLine(style.color, Offset(c.x - d, c.y - d), Offset(c.x + d, c.y + d), stroke, StrokeCap.Round)
+            drawLine(style.color, Offset(c.x - d, c.y + d), Offset(c.x + d, c.y - d), stroke, StrokeCap.Round)
         }
         FaceStyle.SQUARE -> {
             val h = r * 0.46f
@@ -185,34 +184,35 @@ fun FaceCluster(
     opacity: Float,
     hapticsEnabled: Boolean,
     setButton: (ButtonId, Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     Box(
         modifier = modifier
             .size(side)
             .graphicsLayer { alpha = opacity }
     ) {
-        val buttonSize = side * 0.40f
-        val spread = side * 0.28f
+        val buttonSize = side * 0.435f
+        val spread = side * 0.282f
         FaceButton(
             FaceStyle.TRIANGLE, buttonSize, 1f, hapticsEnabled,
             { setButton(ButtonId.TRIANGLE, it) },
-            Modifier.align(Alignment.Center).offset(y = -spread)
+            Modifier.align(Alignment.Center).offset(y = -spread), interactive
         )
         FaceButton(
             FaceStyle.CIRCLE, buttonSize, 1f, hapticsEnabled,
             { setButton(ButtonId.CIRCLE, it) },
-            Modifier.align(Alignment.Center).offset(x = spread)
+            Modifier.align(Alignment.Center).offset(x = spread), interactive
         )
         FaceButton(
             FaceStyle.CROSS, buttonSize, 1f, hapticsEnabled,
             { setButton(ButtonId.CROSS, it) },
-            Modifier.align(Alignment.Center).offset(y = spread)
+            Modifier.align(Alignment.Center).offset(y = spread), interactive
         )
         FaceButton(
             FaceStyle.SQUARE, buttonSize, 1f, hapticsEnabled,
             { setButton(ButtonId.SQUARE, it) },
-            Modifier.align(Alignment.Center).offset(x = -spread)
+            Modifier.align(Alignment.Center).offset(x = -spread), interactive
         )
     }
 }
@@ -227,11 +227,13 @@ fun BumperButton(
     opacity: Float,
     hapticsEnabled: Boolean,
     onChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     HoldButton(
         onChange = onChange,
         hapticsEnabled = hapticsEnabled,
+        interactive = interactive,
         modifier = modifier
             .size(width, height)
             .graphicsLayer { alpha = opacity }
@@ -239,15 +241,15 @@ fun BumperButton(
         Box(
             Modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(percent = 50))
-                .background(if (pressed) Accent.copy(alpha = 0.30f) else SurfaceElevated.copy(alpha = 0.85f))
-                .border(1.dp, if (pressed) Accent else BorderGlow, RoundedCornerShape(percent = 50)),
+                .clip(RoundedCornerShape(percent = 28))
+                .background(if (pressed) Accent else Color(0xFF2D2D30))
+                .border(1.dp, if (pressed) Accent else BorderGlow, RoundedCornerShape(percent = 28)),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 label,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (pressed) TextPrimary else TextSecondary
+                color = if (pressed) DeepBlack else TextPrimary
             )
         }
     }
@@ -267,62 +269,50 @@ fun TriggerButton(
     opacity: Float,
     hapticsEnabled: Boolean,
     onChange: (Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     var value by remember { mutableStateOf(0f) }
     val haptic = LocalHapticFeedback.current
-    Box(
-        modifier = modifier
-            .size(width, height)
-            .graphicsLayer { alpha = opacity }
-            .pointerInput(hapticsEnabled) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    value = 1f
-                    onChange(1f)
-                    if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    down.consume()
-                    val startY = down.position.y
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.changedToUp()) break
-                        val travel = (change.position.y - startY) / (size.height * 0.7f)
-                        val v = (1f - travel).coerceIn(0f, 1f)
-                        value = v
-                        onChange(v)
-                        change.consume()
-                    }
-                    value = 0f
-                    onChange(0f)
+    val changeState by rememberUpdatedState(onChange)
+    val gesture = if (interactive) Modifier.pointerInput(hapticsEnabled) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            value = 1f
+            try {
+                changeState(1f)
+                if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                down.consume()
+                while (true) {
+                    val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (change.changedToUp()) break
+                    val travel = (change.position.y - down.position.y) / (size.height * .7f)
+                    value = (1f - travel).coerceIn(0f, 1f)
+                    changeState(value)
+                    change.consume()
                 }
+            } finally {
+                value = 0f
+                changeState(0f)
             }
-    ) {
+        }
+    } else Modifier
+    Box(modifier.size(width, height).graphicsLayer { alpha = opacity }.then(gesture)) {
         Canvas(Modifier.fillMaxSize()) {
-            drawRoundRect(
-                color = SurfaceElevated.copy(alpha = 0.85f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx())
-            )
-            val fillH = size.height * value
-            if (fillH > 1f) {
-                drawRoundRect(
-                    color = Accent.copy(alpha = 0.45f),
-                    topLeft = Offset(0f, size.height - fillH),
-                    size = androidx.compose.ui.geometry.Size(size.width, fillH),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx())
-                )
-            }
-            drawRoundRect(
-                color = if (value > 0f) Accent else BorderGlow,
-                style = Stroke(1.dp.toPx()),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx())
-            )
+            val radius = CornerRadius(12.dp.toPx())
+            drawRoundRect(Brush.verticalGradient(listOf(Color(0xFF444447), Color(0xFF181819))), cornerRadius = radius)
+            drawRoundRect(if (value > 0f) Accent else BorderGlow, cornerRadius = radius, style = Stroke(1.dp.toPx()))
+            val track = size.width * .72f
+            val start = Offset((size.width - track) / 2f, size.height * .79f)
+            drawLine(TextSecondary.copy(alpha = .33f), start, start.copy(x = start.x + track), 2.dp.toPx(), StrokeCap.Round)
+            if (value > 0f) drawLine(Accent, start, start.copy(x = start.x + track * value), 2.dp.toPx(), StrokeCap.Round)
         }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 label,
-                style = MaterialTheme.typography.titleMedium,
-                color = if (value > 0f) TextPrimary else TextSecondary
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.offset(y = (-2).dp),
+                color = TextPrimary
             )
         }
     }
@@ -338,11 +328,13 @@ fun PillButton(
     opacity: Float,
     hapticsEnabled: Boolean,
     onChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     HoldButton(
         onChange = onChange,
         hapticsEnabled = hapticsEnabled,
+        interactive = interactive,
         modifier = modifier
             .size(width, height)
             .graphicsLayer { alpha = opacity }
@@ -350,15 +342,15 @@ fun PillButton(
         Box(
             Modifier
                 .fillMaxSize()
-                .clip(RoundedCornerShape(percent = 50))
-                .background(if (pressed) Accent.copy(alpha = 0.35f) else SurfaceElevated.copy(alpha = 0.9f))
-                .border(1.dp, if (pressed) Accent else BorderGlow, RoundedCornerShape(percent = 50)),
+                .clip(RoundedCornerShape(percent = 48))
+                .background(if (pressed) Accent else DeepBlack)
+                .border(1.dp, if (pressed) Accent else BorderGlow, RoundedCornerShape(percent = 48)),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 label,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (pressed) TextPrimary else TextSecondary
+                color = if (pressed) DeepBlack else TextPrimary
             )
         }
     }
@@ -373,25 +365,28 @@ fun TouchpadArea(
     height: Dp,
     opacity: Float,
     onContact: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     HoldButton(
         onChange = onContact,
         hapticsEnabled = false,
-        modifier = modifier
+        interactive = interactive,
+        modifier = modifier.semantics { contentDescription = "Panel táctil" }
             .size(width, height)
             .graphicsLayer { alpha = opacity }
     ) { pressed ->
         Canvas(Modifier.fillMaxSize()) {
+            val corner = CornerRadius(12.dp.toPx())
             drawRoundRect(
-                color = SurfaceElevated.copy(alpha = if (pressed) 0.55f else 0.35f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx())
+                Brush.verticalGradient(listOf(Color(0xFF29292B), Color(0xFF141415))),
+                cornerRadius = corner
             )
-            drawRoundRect(
-                color = if (pressed) Accent else BorderGlow.copy(alpha = 0.7f),
-                style = Stroke(1.dp.toPx()),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx())
-            )
+            val mark = if (pressed) Accent else TextSecondary.copy(alpha = .32f)
+            for (row in 1..4) for (column in 1..13) {
+                drawCircle(mark, 0.8.dp.toPx(), Offset(size.width * column / 14f, size.height * row / 5f))
+            }
+            drawRoundRect(if (pressed) Accent else BorderGlow, cornerRadius = corner, style = Stroke(1.4.dp.toPx()))
         }
     }
 }

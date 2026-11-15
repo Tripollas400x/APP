@@ -9,12 +9,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.text.font.FontFamily
+import com.phantompad.app.ui.theme.BorderGlow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -78,18 +81,23 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
         Modifier
             .fillMaxSize()
             .background(DeepBlack)
-            .padding(16.dp)
+            .padding(horizontal = 18.dp, vertical = 6.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver", tint = TextPrimary)
             }
-            Text("Diagnóstico", style = MaterialTheme.typography.titleLarge, color = TextPrimary)
+            Text("Diagnóstico", style = MaterialTheme.typography.headlineMedium, color = TextPrimary, modifier = Modifier.weight(1f))
+            Button(onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) }) {
+                Text("Copiar registro")
+            }
         }
 
-        LazyColumn(
-            Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.weight(1f).padding(top = 5.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp)
         ) {
             item {
                 InfoCard(title = "Bluetooth") {
@@ -142,25 +150,18 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
                     InfoRow("Touchpad", if (snapshot.touch) "contacto" else "-")
                 }
             }
-            item {
-                InfoCard(title = "Registro (últimos 40 eventos)") {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                InfoCard(title = "Registro · últimos 40 eventos") {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         log.takeLast(40).forEach { line ->
                             Text(
                                 line,
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                                 color = TextSecondary,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Accent)
-                    ) {
-                        Text("Copiar registro completo", color = DeepBlack)
                     }
                 }
             }
@@ -170,7 +171,11 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
 
 @Composable
 private fun InfoCard(title: String, content: @Composable () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = SurfaceDark), modifier = Modifier.fillMaxWidth()) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+        border = BorderStroke(1.dp, BorderGlow),
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Column(Modifier.padding(12.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, color = Accent)
             Spacer(Modifier.height(6.dp))
@@ -181,8 +186,8 @@ private fun InfoCard(title: String, content: @Composable () -> Unit) {
 
 @Composable
 private fun InfoRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = TextSecondary, modifier = Modifier.width(150.dp))
-        Text(value, style = MaterialTheme.typography.labelSmall, color = TextPrimary, modifier = Modifier.weight(1f))
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = TextSecondary, modifier = Modifier.weight(.85f))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = TextPrimary, modifier = Modifier.weight(1.15f))
     }
 }

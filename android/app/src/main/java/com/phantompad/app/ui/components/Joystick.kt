@@ -1,5 +1,7 @@
 package com.phantompad.app.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -10,9 +12,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -26,7 +31,7 @@ import androidx.compose.ui.unit.dp
 import com.phantompad.app.gamepad.StickMath
 import com.phantompad.app.ui.theme.Accent
 import com.phantompad.app.ui.theme.BorderGlow
-import com.phantompad.app.ui.theme.SurfaceElevated
+import com.phantompad.app.ui.theme.DeepBlack
 
 /**
  * Joystick analógico virtual. Sigue a UN dedo (por id) para no interferir con
@@ -42,27 +47,31 @@ fun Joystick(
     hapticsEnabled: Boolean,
     onMove: (Float, Float) -> Unit,
     onPress: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    interactive: Boolean = true
 ) {
     var knob by remember { mutableStateOf(Offset.Zero) }
     var pressed by remember { mutableStateOf(false) }
+    val rim by animateFloatAsState(if (pressed) 1f else .52f, tween(100), label = "stickRim")
     val haptic = LocalHapticFeedback.current
+    val move by rememberUpdatedState(onMove)
+    val press by rememberUpdatedState(onPress)
 
     Box(
         modifier = modifier
             .size(side)
             .graphicsLayer { alpha = opacity }
-            .pointerInput(deadzone, sensitivity) {
+            .then(if (interactive) Modifier.pointerInput(deadzone, sensitivity, hapticsEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     pressed = true
                     if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onPress(true)
+                    press(true)
                     val activeId = down.id
                     try {
                         applyPointer(down.position, size, deadzone, sensitivity) { k, x, y ->
                             knob = k
-                            onMove(x, y)
+                            move(x, y)
                         }
                         down.consume()
                         while (true) {
@@ -72,7 +81,7 @@ fun Joystick(
                             if (change.changedToUp()) break
                             applyPointer(change.position, size, deadzone, sensitivity) { k, x, y ->
                                 knob = k
-                                onMove(x, y)
+                                move(x, y)
                             }
                             change.consume()
                         }
@@ -81,51 +90,31 @@ fun Joystick(
                         // desmontaje del control, pérdida de foco): el stick
                         // vuelve al centro y ningún botón queda apretado.
                         knob = Offset.Zero
-                        onMove(0f, 0f)
-                        onPress(false)
+                        move(0f, 0f)
+                        press(false)
                         pressed = false
                     }
                 }
-            }
+            } else Modifier)
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            val center = this.center
-            val ringRadius = this.size.minDimension / 2f - 4.dp.toPx()
+            val r = size.minDimension * .47f
+            val pad = center + knob
+            drawCircle(DeepBlack, r)
+            drawCircle(Color(0xFF242425), r * .84f)
+            drawCircle(BorderGlow, r, style = Stroke(1.5.dp.toPx()))
+            drawCircle(Color(0xFF7F7F85), r * .83f, style = Stroke(1.dp.toPx()))
+            val capRadius = r * .53f
+            drawCircle(Color.Black.copy(alpha = .6f), capRadius, pad + Offset(0f, r * .08f))
             drawCircle(
-                color = SurfaceElevated.copy(alpha = 0.55f),
-                radius = ringRadius,
-                center = center
+                Brush.radialGradient(
+                    colors = listOf(Color(0xFF56565A), Color(0xFF242426), Color(0xFF101011)),
+                    center = pad - Offset(0f, capRadius * .24f), radius = capRadius * 1.27f
+                ),
+                capRadius, pad
             )
-            drawCircle(
-                color = if (pressed) Accent.copy(alpha = 0.8f) else BorderGlow,
-                radius = ringRadius,
-                center = center,
-                style = Stroke(width = 1.5.dp.toPx())
-            )
-            drawLine(
-                color = BorderGlow.copy(alpha = 0.6f),
-                start = Offset(center.x - ringRadius, center.y),
-                end = Offset(center.x + ringRadius, center.y),
-                strokeWidth = 1.dp.toPx()
-            )
-            drawLine(
-                color = BorderGlow.copy(alpha = 0.6f),
-                start = Offset(center.x, center.y - ringRadius),
-                end = Offset(center.x, center.y + ringRadius),
-                strokeWidth = 1.dp.toPx()
-            )
-            val knobRadius = ringRadius * 0.42f
-            drawCircle(
-                color = (if (pressed) Accent else SurfaceElevated).copy(alpha = 0.92f),
-                radius = knobRadius,
-                center = center + knob
-            )
-            drawCircle(
-                color = if (pressed) Accent else BorderGlow,
-                radius = knobRadius,
-                center = center + knob,
-                style = Stroke(width = 1.dp.toPx())
-            )
+            drawCircle(Accent.copy(alpha = rim), capRadius, pad, style = Stroke(1.4.dp.toPx()))
+            drawCircle(Accent.copy(alpha = .17f), capRadius * .78f, pad, style = Stroke(1.dp.toPx()))
         }
     }
 }
@@ -145,6 +134,6 @@ private inline fun applyPointer(
     val (dzx, dzy) = StickMath.radialDeadzone(dx, dy, deadzone)
     val nx = StickMath.responseCurve(dzx, sensitivity)
     val ny = StickMath.responseCurve(dzy, sensitivity)
-    val knob = Offset(nx, ny) * (radius * 0.82f)
+    val knob = Offset(nx, ny) * (radius * .43f)
     onResult(knob, nx, ny)
 }
