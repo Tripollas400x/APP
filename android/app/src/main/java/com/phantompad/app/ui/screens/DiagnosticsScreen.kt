@@ -11,9 +11,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -29,10 +30,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.phantompad.app.PadViewModel
 import com.phantompad.app.protocol.ButtonId
+import com.phantompad.app.transport.RfcommTransport
 import com.phantompad.app.transport.TransportState
 import com.phantompad.app.ui.theme.Accent
 import com.phantompad.app.ui.theme.DeepBlack
@@ -44,8 +48,10 @@ import kotlinx.coroutines.delay
 private fun formatMs(v: Double?): String = if (v == null) "n/d" else "%.1f ms".format(v)
 
 /**
- * Diagnóstico: estado del transporte, medición de latencia real (RTT),
- * botones presionados, valores de ejes y registro de eventos.
+ * Diagnóstico avanzado: dónde se interrumpe la conexión. Muestra el estado
+ * real de Bluetooth (adaptador, permisos, escaneo, emparejados), el canal
+ * (UUID, estado de transporte), la medición de latencia real (RTT), los
+ * frames enviados, la entrada en vivo y el registro completo copiable.
  */
 @Composable
 fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
@@ -57,6 +63,7 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
         }
     }
 
+    val clipboard = LocalClipboardManager.current
     val hubStats = vm.hub.stats.collectAsState().value
     val latencyStats = vm.latency.stats.collectAsState().value
     val transportState = vm.transportState.collectAsState().value
@@ -64,6 +71,7 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
     val battery = vm.battery.percent.collectAsState().value
     val log = vm.log.entries.collectAsState().value
     val settings = vm.settings.collectAsState().value
+    val btEnabled = vm.bt.enabled.collectAsState().value
     val snapshot = remember(tick) { vm.state.snapshot() }
 
     Column(
@@ -84,7 +92,17 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item {
-                InfoCard(title = "Conexión") {
+                InfoCard(title = "Bluetooth") {
+                    InfoRow("Adaptador", if (btEnabled) "activado" else "desactivado")
+                    InfoRow("Permisos", if (vm.bt.hasPermissions()) "concedidos" else "FALTAN")
+                    InfoRow("Escaneo", if (vm.bt.isDiscovering()) "en curso" else "detenido")
+                    InfoRow("Emparejados", "${vm.bt.devices.collectAsState().value.count { it.bonded }} dispositivos")
+                    InfoRow("Método", if (settings.transportMode == com.phantompad.app.data.TransportModeWire.RECEIVER) "Receptor Windows (RFCOMM)" else "HID directo")
+                    InfoRow("UUID servicio", RfcommTransport.SPP_UUID.toString())
+                }
+            }
+            item {
+                InfoCard(title = "Canal de conexión") {
                     InfoRow("Transporte", if (settings.transportMode == com.phantompad.app.data.TransportModeWire.RECEIVER) "RFCOMM/SPP a receptor Windows" else "HID directo")
                     InfoRow("Dispositivo", device?.name ?: settings.lastDeviceName ?: "n/d")
                     InfoRow("Estado", when (transportState) {
@@ -110,6 +128,7 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
                 InfoCard(title = "Envío") {
                     InfoRow("Frecuencia objetivo", "${hubStats.targetRateHz} Hz")
                     InfoRow("Frames enviados", hubStats.framesSent.toString())
+                    InfoRow("Último envío", if (hubStats.lastSendMs == 0L) "n/d" else "$((System.currentTimeMillis() - hubStats.lastSendMs)) ms atrás")
                 }
             }
             item {
@@ -123,7 +142,7 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
                 }
             }
             item {
-                InfoCard(title = "Registro") {
+                InfoCard(title = "Registro (últimos 40 eventos)") {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         log.takeLast(40).forEach { line ->
                             Text(
@@ -134,6 +153,13 @@ fun DiagnosticsScreen(vm: PadViewModel, onBack: () -> Unit) {
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent)
+                    ) {
+                        Text("Copiar registro completo", color = DeepBlack)
                     }
                 }
             }
