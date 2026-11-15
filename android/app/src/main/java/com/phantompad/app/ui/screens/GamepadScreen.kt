@@ -205,7 +205,11 @@ fun PadLayoutView(
                 sensitivity = settings.sensitivity,
                 hapticsEnabled = hapticsEnabled,
                 onMove = set,
-                onPress = { state.setButton(press, it) },
+                // Mover el stick NO activa L3/R3: solo si el usuario lo activa
+                // explícitamente en Ajustes ("L3/R3 al pulsar el stick").
+                onPress = { clicked ->
+                    if (settings.stickClickEnabled) state.setButton(press, clicked)
+                },
                 modifier = decorate(id, place(el, side, side))
             )
         }
@@ -291,6 +295,29 @@ fun PadLayoutView(
         pill(ElementIdsLocal.SHARE, "SHARE", ButtonId.SHARE)
         pill(ElementIdsLocal.OPTIONS, "OPTIONS", ButtonId.OPTIONS)
         pill(ElementIdsLocal.PS, "PS", ButtonId.PS)
+
+        // L3/R3 dedicados: interacción independiente del movimiento de los
+        // sticks (posiciones fijas junto al centro inferior; no interfieren
+        // con ninguno de los perfiles y no requieren reconfigurar layouts).
+        @Composable
+        fun fixedPill(label: String, buttonId: ButtonId, x: Float, y: Float, scale: Float) {
+            val width = minWH * 0.10f * scale
+            val height = minWH * 0.05f * scale
+            PillButton(
+                label = label,
+                width = width,
+                height = height,
+                opacity = 0.9f,
+                hapticsEnabled = hapticsEnabled,
+                onChange = { state.setButton(buttonId, it) },
+                modifier = Modifier.offset(
+                    x = w * x - width / 2,
+                    y = h * y - height / 2
+                )
+            )
+        }
+        fixedPill("L3", ButtonId.L3, 0.435f, 0.905f, 0.95f)
+        fixedPill("R3", ButtonId.R3, 0.565f, 0.905f, 0.95f)
 
         // Panel táctil
         val touchEl = elementFor(ElementIdsLocal.TOUCHPAD)

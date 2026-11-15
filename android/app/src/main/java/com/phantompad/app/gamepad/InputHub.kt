@@ -6,11 +6,13 @@ import com.phantompad.app.transport.Transport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Bucle de envío: codifica el estado del mando y lo manda a la frecuencia
@@ -88,7 +90,13 @@ class InputHub(
         } catch (e: Exception) {
             transport.onSendFailure(e)
         } finally {
-            transport.safeReleaseAll()
+            // La cancelación de la coroutine también cancela las llamadas
+            // suspend normales del finally: con NonCancellable garantizamos que
+            // RELEASE_ALL sale aunque el bucle se esté cancelando; si el enlace
+            // ya está muerto, el failsafe del receptor libera por su lado.
+            withContext(NonCancellable) {
+                transport.safeReleaseAll()
+            }
         }
     }
 

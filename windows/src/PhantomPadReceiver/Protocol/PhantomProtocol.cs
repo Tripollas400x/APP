@@ -159,4 +159,99 @@ public static class PhantomProtocol
         f[2] = Version;
         f[3] = (byte)type;
     }
+
+    /// <summary>Longitud total de un frame según su byte de tipo; 0 si es desconocido.</summary>
+    public static int LengthOfType(byte type) => type switch
+    {
+        (byte)FrameType.Input => InputLen,
+        (byte)FrameType.Ping or (byte)FrameType.Pong => PingLen,
+        (byte)FrameType.Rumble => RumbleLen,
+        (byte)FrameType.ReleaseAll => ReleaseAllLen,
+        _ => 0
+    };
+}
+
+/// <summary>
+/// Parser incremental de frames del protocolo. Resuelve el problema de
+/// desincronización del lector antiguo: acepta frames fragmentados en varias
+/// lecturas del socket, varios frames juntos, bytes corruptos, CRC inválido y
+/// tipos desconocidos, recuperando siempre la sincronización byte a byte.
+/// Uso: Append() con lo que llegue del socket y TryReadFrame() hasta que
+/// devuelva false. Hilo único de consumo (el bucle de lectura).
+/// </summary>
+public sealed class FramePipe
+{
+    private byte[] _buffer = new byte[8 * 1024];
+    private int _length;
+
+    /// <summary>Frames completos descartados por CRC inválido.</summary>
+    public int RejectedFrames { get; private set; }
+
+    /// <summary>Bytes descartados durante la resincronización.</summary>
+    public int DroppedBytes { get; private set; }
+
+    /// <summary>Bytes pendientes de procesar dentro del pipe.</summary>
+    public int PendingBytes => _length;
+
+    public void Append(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty) return;
+        // Drop() mantiene siempre los bytes pendientes al inicio del buffer,
+        // así que basta con crecer si lo nuevo no cabe.
+        if (_length + data.Length > _buffer.Length)
+        {
+            Array.Resize(ref _buffer, (_length + data.Length + 4095) & ~4095);
+        }
+        data.CopyTo(_buffer.AsSpan(_length));
+        _length += data.Length;
+    }
+
+    /// <summary>
+    /// Intenta extraer el siguiente frame válido. Devuelve false si no hay
+    /// suficientes bytes para un frame completo. Los bytes basura y los
+    /// frames corruptos se descartan internamente (resincronización).
+    /// </summary>
+    public bool TryReadFrame(out byte[] frame, out FrameType type)
+    {
+        frame = Array.Empty<byte>();
+        type = default;
+        while (true)
+        {
+            if (_length < PhantomProtocol.HeaderLen) return false;
+
+            if (_buffer[0] != PhantomProtocol.Magic0 || _buffer[1] != PhantomProtocol.Magic1 ||
+                _buffer[2] != PhantomProtocol.Version)
+            {
+                Drop(1); // basura delante: resincronizar byte a byte
+                continue;
+            }
+
+            int expected = PhantomProtocol.LengthOfType(_buffer[3]);
+            if (expected == 0)
+            {
+                Drop(1); // tipo desconocido: no se sabe su longitud, resincronizar
+                continue;
+            }
+            if (_length < expected) return false; // frame a medias: esperar más bytes
+
+            if (PhantomProtocol.Crc8(_buffer.AsSpan(0, expected - 1)) != _buffer[expected - 1])
+            {
+                RejectedFrames++;
+                Drop(expected); // frame corrupto completo fuera
+                continue;
+            }
+
+            frame = _buffer.AsSpan(0, expected).ToArray();
+            type = (FrameType)_buffer[3];
+            Drop(expected);
+            return true;
+        }
+    }
+
+    private void Drop(int count)
+    {
+        DroppedBytes += count;
+        _buffer.AsSpan(count, _length - count).CopyTo(_buffer);
+        _length -= count;
+    }
 }

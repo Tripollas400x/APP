@@ -12,11 +12,16 @@ namespace PhantomPadReceiver.Core;
 
 /// <summary>
 /// Corazón del receptor: publica el servicio Bluetooth, decodifica los frames
-/// del teléfono, alimenta el mando virtual, responde PING para que el teléfono
-/// mida el RTT, reenvía rumble y aplica el failsafe anti-botones-atascados.
-/// Si el mando virtual falla al arrancar (driver ocupado, bus sin respuesta),
-/// reintenta automáticamente cada pocos segundos sin que el usuario tenga que
-/// pulsar Detener/Iniciar.
+/// del teléfono (parser incremental FramePipe), alimenta el mando virtual,
+/// responde PING para que el teléfono mida el RTT, reenvía rumble y aplica el
+/// failsafe anti-botones-atascados (una sola vez por pérdida, con aviso de
+/// recuperación).
+///
+/// Separación de responsabilidades: el servicio Bluetooth arranca y funciona
+/// aunque ViGEmBus falle (los frames del teléfono se reciben, decodifican y
+/// muestran igualmente), y el mando virtual se reintent a en segundo plano si
+/// el bus no lo aceptó. Cada conexión entrante tiene un ID de sesión para que
+/// el cierre de una sesión vieja no toque el estado de la nueva.
 /// </summary>
 public sealed class ReceiverEngine : IDisposable
 {
@@ -25,6 +30,10 @@ public sealed class ReceiverEngine : IDisposable
 
     private const int PadRetryFirstDelayMs = 3000;
     private const int PadRetryPeriodMs = 5000;
+    private const int ServerRetryFirstDelayMs = 4000;
+    private const int ServerRetryPeriodMs = 5000;
+    private const int FailsafeTimeoutMs = 1000;
+    private const int LocalTestStepMs = 120;
 
     private readonly RfcommServer _server = new();
     private VirtualController? _pad;
@@ -34,10 +43,16 @@ public sealed class ReceiverEngine : IDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private Timer? _failsafeTimer;
     private Timer? _padRetryTimer;
+    private Timer? _serverRetryTimer;
     private long _lastFrameTimestamp;
     private int _failsafeEvents;
     private long _frames;
     private int _padRetryCount;
+    private int _serverRetryCount;
+    private int _sessionCounter;
+    private int _activeSession;
+    private bool _linkDegraded;
+    private bool _localTestRunning;
     private volatile bool _running;
 
     public PadMode Mode { get; private set; } = PadMode.Xbox360;
@@ -46,15 +61,25 @@ public sealed class ReceiverEngine : IDisposable
     public InputFrame LastFrame { get; private set; }
     public bool VigemReady => _pad?.Ready ?? false;
     public int VirtualPadIndex => _pad?.UserIndex ?? -1;
+    public bool PadIndexPending => _pad is { UserIndexPending: true };
     public bool PadFellBack => _pad?.FellBackToDs4 ?? false;
 
     /// <summary>Mensaje del último fallo del mando virtual (null si está listo).</summary>
     public string? PadError { get; private set; }
 
+    /// <summary>Mensaje del último fallo del servicio Bluetooth (null si publicado).</summary>
+    public string? ServerError => _server.LastError;
+
+    /// <summary>Último error completo (con tipo y HRESULT) para diagnóstico.</summary>
+    public string? LastDiagnosticError { get; private set; }
+
     public bool Advertising => _server.IsAdvertising;
     public long TotalFrames => Interlocked.Read(ref _frames);
     public int FailsafeEvents => _failsafeEvents;
+    public int RejectedFrames { get; private set; }
     public double FramesPerSecond { get; private set; }
+
+    public bool LocalTestRunning => _localTestRunning;
 
     public async Task StartAsync(PadMode mode)
     {
@@ -62,42 +87,69 @@ public sealed class ReceiverEngine : IDisposable
         Mode = mode;
         _running = true;
 
+        StartPadOrScheduleRetry();
+
+        _server.ConnectionAccepted = OnAccepted;
+        _server.Log += m => Log?.Invoke(m);
+        try
+        {
+            await _server.StartAsync();
+            StopServerRetry();
+        }
+        catch (RfcommServerException ex)
+        {
+            LastDiagnosticError = ex.Message;
+            Log?.Invoke(ex.Message);
+            Log?.Invoke("El servicio Bluetooth reintentará publicarse automáticamente cada " +
+                        ServerRetryPeriodMs / 1000 + " s; mientras tanto puedes ver el estado del mando virtual.");
+            ScheduleServerRetry();
+        }
+
+        _failsafeTimer?.Dispose();
+        _failsafeTimer = new Timer(_ => CheckFailsafe(), null, 500, 500);
+        StateChanged?.Invoke();
+    }
+
+    // ------------------------------------------------------------- mando virtual
+
+    private void StartPadOrScheduleRetry()
+    {
         _pad?.Dispose();
         _pad = null;
         _padRetryCount = 0;
         PadError = null;
+        VirtualController? pad = null;
         try
         {
-            var pad = new VirtualController(mode);
+            pad = new VirtualController(Mode);
             pad.Status += m => Log?.Invoke(m);
             pad.RumbleRequested += OnRumbleRequested;
             pad.Start();
             _pad = pad;
             PadError = null;
             Log?.Invoke(pad.FellBackToDs4
-                ? "Mando virtual listo: DualShock 4 (Xbox 360 no respondió; fallback automático)."
-                : $"Mando virtual listo: {mode} (índice {pad.UserIndex}).");
+                ? "Mando virtual listo: DualShock 4 (Xbox 360 no pudo enchufarse; fallback automático)."
+                : "Mando virtual listo: Xbox 360" + (pad.UserIndexPending
+                    ? " (índice del jugador pendiente: el mando ya es operativo)."
+                    : $" (índice {pad.UserIndex})."));
+            StateChanged?.Invoke();
         }
         catch (VirtualPadException ex)
         {
+            pad?.Dispose();
             PadError = ex.Message;
+            LastDiagnosticError = ex.Message;
             Log?.Invoke("Mando virtual no disponible: " + ex.Message);
             SchedulePadRetry();
         }
         catch (Exception ex)
         {
+            pad?.Dispose();
             PadError = $"{ex.GetType().Name}: {ex.Message}";
+            LastDiagnosticError = RfcommServer.Detail(ex);
             Log?.Invoke("Mando virtual no disponible (" + PadError + "). Reintentaré automáticamente.");
             SchedulePadRetry();
         }
-
-        _server.ConnectionAccepted = OnAccepted;
-        _server.Log += m => Log?.Invoke(m);
-        await _server.StartAsync();
-
-        _failsafeTimer?.Dispose();
-        _failsafeTimer = new Timer(_ => CheckFailsafe(), null, 500, 500);
-        StateChanged?.Invoke();
     }
 
     /// <summary>Reintenta crear el mando virtual en segundo plano, sin que el
@@ -129,7 +181,7 @@ public sealed class ReceiverEngine : IDisposable
             if (_padRetryCount == 1 || _padRetryCount % 4 == 0)
             {
                 Log?.Invoke($"Reintento automático #{_padRetryCount} del mando virtual falló " +
-                            $"({ex.GetType().Name}); sigo probando cada {PadRetryPeriodMs / 1000} s...");
+                            $"({RfcommServer.Detail(ex)}); sigo probando cada {PadRetryPeriodMs / 1000} s...");
             }
             return;
         }
@@ -141,15 +193,62 @@ public sealed class ReceiverEngine : IDisposable
         PadError = null;
         _padRetryCount = 0;
         try { old?.Dispose(); } catch { /* dispose tolerante */ }
+        try { fresh.ReleaseAll(); } catch { }
         Log?.Invoke("Mando virtual LISTO tras reintento automático. Ya puedes jugar.");
         StateChanged?.Invoke();
     }
+
+    // ------------------------------------------------------------- servidor BT
+
+    private void ScheduleServerRetry()
+    {
+        if (!_running) return;
+        _serverRetryTimer?.Dispose();
+        _serverRetryTimer = new Timer(
+            _ => _ = TryRestartServerAsync(), null, ServerRetryFirstDelayMs, ServerRetryPeriodMs);
+    }
+
+    private async Task TryRestartServerAsync()
+    {
+        if (!_running || Advertising)
+        {
+            if (Advertising) StopServerRetry();
+            return;
+        }
+        try
+        {
+            await _server.StartAsync();
+        }
+        catch (RfcommServerException ex)
+        {
+            _serverRetryCount++;
+            if (_serverRetryCount == 1 || _serverRetryCount % 4 == 0)
+            {
+                Log?.Invoke($"Reintento automático #{_serverRetryCount} del servicio Bluetooth falló: {ex.Message}");
+            }
+            return;
+        }
+        StopServerRetry();
+        Log?.Invoke("[BT] Servicio RFCOMM publicado tras reintento automático.");
+        StateChanged?.Invoke();
+    }
+
+    private void StopServerRetry()
+    {
+        _serverRetryTimer?.Dispose();
+        _serverRetryTimer = null;
+        _serverRetryCount = 0;
+    }
+
+    // ------------------------------------------------------------- ciclo de vida
 
     public void StopAll()
     {
         _running = false;
         _padRetryTimer?.Dispose();
         _padRetryTimer = null;
+        _serverRetryTimer?.Dispose();
+        _serverRetryTimer = null;
         _failsafeTimer?.Dispose();
         _failsafeTimer = null;
         StopLinkOnly();
@@ -171,13 +270,19 @@ public sealed class ReceiverEngine : IDisposable
         PhoneName = "-";
     }
 
+    // ------------------------------------------------------------- sesión activa
+
     private async Task OnAccepted(StreamSocket socket)
     {
-        // v0.1: una conexión a la vez; la nueva reemplaza a la anterior.
+        // Cada conexión entrante es una sesión con ID propio: si una conexión
+        // nueva reemplaza a la anterior, el cierre tardío de la vieja ya no
+        // puede marcar como desconectada a la nueva.
+        int session = Interlocked.Increment(ref _sessionCounter);
         var oldCts = _linkCts;
         var oldSocket = _active;
         _linkCts = new CancellationTokenSource();
         _active = socket;
+        _activeSession = session;
         oldCts?.Cancel();
         try { oldSocket?.Dispose(); } catch { }
 
@@ -185,104 +290,104 @@ public sealed class ReceiverEngine : IDisposable
         try { PhoneName = socket.Information.RemoteAddress.DisplayName; }
         catch { PhoneName = "teléfono"; }
         Interlocked.Exchange(ref _frames, 0);
+        RejectedFrames = 0;
+        _linkDegraded = false;
         _lastFrameTimestamp = Stopwatch.GetTimestamp();
         StateChanged?.Invoke();
-        Log?.Invoke(PhoneConnected && VigemReady
-            ? $"Teléfono conectado ({PhoneName}). Los estados llegan al mando virtual."
-            : $"Teléfono conectado ({PhoneName}), pero el mando virtual aún no está listo; " +
-              "en cuanto lo esté, los controles llegarán solos.");
+        Log?.Invoke("[BT] Primer paquete esperado. Teléfono conectado (" + PhoneName + "). " +
+                    (VigemReady
+                        ? "Los estados llegan al mando virtual."
+                        : "El mando virtual aún no está listo; en cuanto lo esté, los controles llegarán solos."));
 
         try
         {
-            await ReadLoop(socket, _linkCts.Token);
+            await ReadLoop(socket, _linkCts.Token, session);
         }
         finally
         {
-            PhoneConnected = false;
-            ReleaseAllNow();
-            StateChanged?.Invoke();
-            Log?.Invoke("Teléfono desconectado. Mando liberado.");
+            if (_activeSession == session)
+            {
+                PhoneConnected = false;
+                ReleaseAllNow();
+                StateChanged?.Invoke();
+                Log?.Invoke("Teléfono desconectado. Mando liberado. El servidor sigue esperando otra conexión.");
+            }
+            else
+            {
+                Log?.Invoke("Sesión anterior cerrada y reemplazada por una conexión nueva.");
+            }
         }
     }
 
-    private async Task ReadLoop(StreamSocket socket, CancellationToken ct)
+    private async Task ReadLoop(StreamSocket socket, CancellationToken ct, int session)
     {
         using var reader = new DataReader(socket.InputStream);
         try { _writer?.Dispose(); } catch { }
         _writer = new DataWriter(socket.OutputStream);
 
-        var buffer = new byte[PhantomProtocol.InputLen];
+        var pipe = new FramePipe();
+        bool firstFrame = true;
+        var chunk = new byte[4096];
 
         while (!ct.IsCancellationRequested)
-        {
-            if (!await ReadExactAsync(reader, buffer.AsMemory(0, PhantomProtocol.HeaderLen), ct)) break;
-            if (buffer[0] != PhantomProtocol.Magic0 || buffer[1] != PhantomProtocol.Magic1)
-            {
-                continue; // desincronizado: descartar bytes hasta recuperar cabecera
-            }
-            var type = (FrameType)buffer[3];
-            int expected = type switch
-            {
-                FrameType.Input => PhantomProtocol.InputLen,
-                FrameType.Ping => PhantomProtocol.PingLen,
-                FrameType.ReleaseAll => PhantomProtocol.ReleaseAllLen,
-                _ => 0
-            };
-            if (expected == 0) continue;
-            if (!await ReadExactAsync(
-                    reader,
-                    buffer.AsMemory(PhantomProtocol.HeaderLen, expected - PhantomProtocol.HeaderLen),
-                    ct)) break;
-
-            // ReadOnlyMemory (no ref struct) para poder cruzar el await del PING.
-            var frame = buffer.AsMemory(0, expected);
-            if (!PhantomProtocol.TryParse(frame.Span, out var parsedType, out var input))
-            {
-                Log?.Invoke("Frame con CRC inválido: descartado.");
-                continue;
-            }
-
-            switch (parsedType)
-            {
-                case FrameType.Input:
-                    LastFrame = input;
-                    _pad?.Apply(input);
-                    Interlocked.Increment(ref _frames);
-                    _lastFrameTimestamp = Stopwatch.GetTimestamp();
-                    break;
-
-                case FrameType.Ping:
-                    await SendAsync(PhantomProtocol.BuildPong(PhantomProtocol.ReadSeq(frame.Span)));
-                    break;
-
-                case FrameType.ReleaseAll:
-                    ReleaseAllNow();
-                    break;
-            }
-        }
-    }
-
-    private static async Task<bool> ReadExactAsync(DataReader reader, Memory<byte> dest, CancellationToken ct)
-    {
-        int total = 0;
-        while (total < dest.Length)
         {
             uint n;
             try
             {
-                n = await reader.LoadAsync((uint)(dest.Length - total)).AsTask(ct);
+                // Lee TODO lo que haya disponible: tolera frames fragmentados
+                // (varias lecturas) y concatenados (varios frames por lectura).
+                n = await reader.LoadAsync(4096).AsTask(ct);
             }
-            catch
+            catch (OperationCanceledException) { break; }
+            catch (Exception)
             {
-                return false;
+                break; // socket cerrado por el teléfono
             }
-            if (n == 0) return false;
+            if (n == 0) break;
             var tmp = new byte[n];
             reader.ReadBytes(tmp);
-            tmp.CopyTo(dest.Span.Slice(total));
-            total += (int)n;
+            pipe.Append(tmp.AsSpan(0, (int)n));
+
+            while (pipe.TryReadFrame(out var frame, out var type))
+            {
+                if (firstFrame)
+                {
+                    firstFrame = false;
+                    Log?.Invoke("[BT] Primer paquete recibido: enlace bidireccional confirmado.");
+                }
+                HandleFrame(type, frame);
+            }
         }
-        return true;
+    }
+
+    private void HandleFrame(FrameType type, byte[] frame)
+    {
+        switch (type)
+        {
+            case FrameType.Input:
+                if (!PhantomProtocol.TryParse(frame, out _, out var input))
+                {
+                    RejectedFrames++;
+                    return;
+                }
+                LastFrame = input;
+                _pad?.Apply(input);
+                Interlocked.Increment(ref _frames);
+                _lastFrameTimestamp = Stopwatch.GetTimestamp();
+                break;
+
+            case FrameType.Ping:
+                {
+                    // seq se extrae ANTES de cualquier await (el frame se descarta al salir).
+                    ushort seq = PhantomProtocol.ReadSeq(frame);
+                    _ = SendAsync(PhantomProtocol.BuildPong(seq));
+                    break;
+                }
+
+            case FrameType.ReleaseAll:
+                ReleaseAllNow();
+                break;
+        }
     }
 
     private async Task SendAsync(byte[] data)
@@ -311,23 +416,101 @@ public sealed class ReceiverEngine : IDisposable
         _ = SendAsync(PhantomProtocol.BuildRumble(small, large));
     }
 
+    /// <summary>
+    /// Failsafe anti-botones-atascados: libera UNA vez al perder datos y avisa
+    /// de la recuperación; no satura el registro repitiendo el aviso.
+    /// </summary>
     private void CheckFailsafe()
     {
-        if (!PhoneConnected) return;
+        if (!PhoneConnected)
+        {
+            _linkDegraded = false;
+            return;
+        }
         double elapsedMs =
             (double)(Stopwatch.GetTimestamp() - _lastFrameTimestamp) / Stopwatch.Frequency * 1000.0;
-        if (elapsedMs > 1000.0)
+        if (elapsedMs > FailsafeTimeoutMs)
         {
-            ReleaseAllNow();
-            Interlocked.Increment(ref _failsafeEvents);
-            Log?.Invoke("Failsafe: sin datos 1 s, mando liberado.");
-            StateChanged?.Invoke();
+            if (!_linkDegraded)
+            {
+                _linkDegraded = true;
+                ReleaseAllNow();
+                Interlocked.Increment(ref _failsafeEvents);
+                Log?.Invoke("Failsafe: sin datos del teléfono durante 1 s; botones liberados (enlace degradado).");
+                StateChanged?.Invoke();
+            }
+        }
+        else if (_linkDegraded && elapsedMs < FailsafeTimeoutMs / 2)
+        {
+            _linkDegraded = false;
+            Log?.Invoke("Enlace recuperado: el teléfono vuelve a enviar datos.");
         }
     }
 
     private void ReleaseAllNow()
     {
         try { _pad?.ReleaseAll(); } catch { /* el driver pudo desaparecer */ }
+    }
+
+    // ------------------------------------------------------------- prueba local
+
+    /// <summary>
+    /// Test A (sin teléfono): barrido de ejes, gatillos y todos los botones a
+    /// través del mando virtual para verificarlo en joy.cpl sin el celular.
+    /// </summary>
+    public async Task RunLocalTestAsync()
+    {
+        if (_pad is not { Ready: true })
+        {
+            Log?.Invoke("PRUEBA LOCAL: no hay mando virtual listo. Pulsa Iniciar primero.");
+            return;
+        }
+        if (_localTestRunning) return;
+        _localTestRunning = true;
+        Log?.Invoke("PRUEBA LOCAL: barrido de ~9 s por ejes, gatillos y botones. Abre joy.cpl para verlo.");
+        try
+        {
+            // 1) Barrido de ejes (2 s)
+            for (int t = 0; t < 20; t++)
+            {
+                double a = t / 20.0 * 2 * Math.PI;
+                var f = new InputFrame(
+                    (ushort)t, 0,
+                    (sbyte)(Math.Sin(a) * 127), (sbyte)(Math.Cos(a) * 127),
+                    (sbyte)(-Math.Sin(a) * 127), (sbyte)(-Math.Cos(a) * 127),
+                    (byte)(t * 255 / 20), (byte)(255 - t * 255 / 20),
+                    0, 0, 0, 0, 0, 0, 0);
+                _pad.Apply(f);
+                await Task.Delay(100).ConfigureAwait(false);
+            }
+            // 2) Botones de a uno (7 s)
+            PadButtons[] order =
+            {
+                PadButtons.Cross, PadButtons.Circle, PadButtons.Square, PadButtons.Triangle,
+                PadButtons.DpadUp, PadButtons.DpadDown, PadButtons.DpadLeft, PadButtons.DpadRight,
+                PadButtons.L1, PadButtons.R1, PadButtons.L3, PadButtons.R3,
+                PadButtons.Share, PadButtons.Options, PadButtons.Ps, PadButtons.Touchpad
+            };
+            foreach (var b in order)
+            {
+                _pad.Apply(new InputFrame((ushort)b.GetHashCode(), b,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+                await Task.Delay(LocalTestStepMs).ConfigureAwait(false);
+            }
+            // 3) Reposo
+            ReleaseAllNow();
+            Log?.Invoke("PRUEBA LOCAL completada: el mando virtual quedó en reposo. " +
+                        "Si joy.cpl no mostró el barrido, revisa ViGEmBus (docs/INSTALL_WINDOWS.md).");
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke("PRUEBA LOCAL interrumpida: " + RfcommServer.Detail(ex));
+        }
+        finally
+        {
+            ReleaseAllNow();
+            _localTestRunning = false;
+        }
     }
 
     public void Dispose() => StopAll();
