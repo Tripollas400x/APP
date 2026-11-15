@@ -59,7 +59,7 @@ Síntoma: se conecta y se desconecta en segundos.
 
 ## 9. Xbox 360, índice sin asignar y mandos repetidos
 
-El callback de ViGEm puede entregar 255 mientras Windows asigna el slot. XInput admite 0–3. El panel muestra el resultado de cada consulta (0 = responde, 1167 = desconectado). La prueba local puede atribuir un slot aunque el callback siga indicando 255, si solo un slot reproduce los informes del barrido.
+El callback de ViGEm puede entregar 255 mientras Windows asigna el slot. El driver inicializa el número de LED en -1 y ViGEm.NET recibe el byte sin signo. [ViGEmBus](https://github.com/nefarius/ViGEmBus/blob/d986e1d93708ec9b11049542fa6027272cce716c/sys/XusbPdo.cpp#L221) · [ViGEm.NET](https://github.com/nefarius/ViGEm.NET/blob/2197a9a6200a1cc4cbefc19e4ef6c9bbb63ff567/ViGEmClient/Targets/Xbox360Controller.cs#L87). XInput admite 0–3. El panel muestra el resultado de cada consulta (0 = responde, 1167 = desconectado). La prueba local puede atribuir un slot aunque el callback siga indicando 255, si solo un slot reproduce los informes del barrido.
 
 1. Desconecta el teléfono, detén el receptor y anota los mandos que siguen en `joy.cpl`.
 2. Inicia el receptor en Xbox 360 y vuelve a abrir `joy.cpl`. Usa **Prueba local** para reconocer qué mando reproduce el barrido.
@@ -72,7 +72,7 @@ El callback de ViGEm puede entregar 255 mientras Windows asigna el slot. XInput 
 - `Bluetooth está APAGADO`: actívalo en Configuración > Bluetooth.
 - `CreateAsync falló`: cierra otros Phantom Pad Receiver abiertos (mismo UUID) o reinicia el Bluetooth del PC.
 - `BindServiceNameAsync falló`: reinicia el Bluetooth del PC y vuelve a pulsar Iniciar; el receptor reintenta solo cada 5 s.
-- El teléfono debe estar EMPAREJADO con el PC antes de pulsar Iniciar.
+- Empareja el teléfono con el PC. Si se apaga la radio después de publicar el servicio, el receptor cierra la sesión y vuelve a intentar publicarlo al recuperar Bluetooth.
 
 ## 11. La app no conecta por RFCOMM
 

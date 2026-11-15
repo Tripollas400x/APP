@@ -9,7 +9,7 @@ namespace PhantomPadReceiver.Core;
 public readonly record struct ReceiverDiagnostics(
     int SessionId, string Peer, long Bytes, long Inputs, long Frames, long MissingInputs,
     int CrcErrors, int UnknownFrames, int DroppedBytes, int PendingBytes,
-    int ReadBytes, int ReadFrames, double ReadGapMs, double InputGapMs, double MaximumInputGapMs,
+    int ReadBytes, int ReadFrames, long LateInputs, double ReadGapMs, double InputGapMs, double MaximumInputGapMs,
     double ProcessingMs, double? InputAgeMs, double? RttMs, int Failsafes, bool LinkDegraded,
     ControllerState PadState, string PadIdentity, int RawIndex, string XInput, string? Error);
 
@@ -62,7 +62,7 @@ public sealed class ReceiverEngine
                     new ReceiverDiagnostics(session.Id, _peer, session.Bytes, session.Inputs, session.ValidFrames,
                         session.MissingInputs, session.Pipe.RejectedFrames, session.Pipe.UnknownFrames,
                         session.Pipe.DroppedBytes, session.Pipe.PendingBytes, session.LastReadBytes,
-                        session.LastReadFrames, session.ReadGapMs, session.InputGapMs, session.MaximumInputGapMs,
+                        session.LastReadFrames, session.LateInputs, session.ReadGapMs, session.InputGapMs, session.MaximumInputGapMs,
                         session.ProcessingMs, session.Watchdog.LastInputAt == 0 ? null :
                         Stopwatch.GetElapsedTime(session.Watchdog.LastInputAt).TotalMilliseconds,
                         session.RttMs, _failsafes, session.Watchdog.Degraded, default, "", -1, "", null);
@@ -144,7 +144,17 @@ public sealed class ReceiverEngine
                 {
                     await _server.StartAsync(ct).ConfigureAwait(false);
                     StateChanged?.Invoke();
-                    await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false);
+                    await _server.WaitForRadioLossAsync(ct).ConfigureAwait(false);
+                    _server.Stop();
+                    lock (_gate)
+                    {
+                        if (_lifetime?.Token != ct) return;
+                        EndSession();
+                        ReleaseInput();
+                    }
+                    attempt = -1;
+                    Log?.Invoke("[BT] Radio apagada. Se volverá a publicar el servicio al recuperarla.");
+                    StateChanged?.Invoke();
                 }
                 catch (RfcommServerException ex)
                 {
@@ -200,7 +210,7 @@ public sealed class ReceiverEngine
         var pad = new VirtualController(Mode);
         pad.Status += message => Log?.Invoke(message);
         pad.RumbleRequested += (small, large) =>
-            Volatile.Read(ref _session)?.Send(PhantomProtocol.BuildRumble(small, large));
+            Volatile.Read(ref _session)?.SendRumble(small, large);
         try
         {
             pad.Start();
@@ -321,7 +331,7 @@ public sealed class ReceiverEngine
                 {
                     case FrameType.Input:
                         if (!PhantomProtocol.TryParse(frame, out _, out var input)) break;
-                        session.RecordInput(input, arrivedAt);
+                        if (!session.RecordInput(input, arrivedAt)) break;
                         if (session.Watchdog.Accept(arrivedAt)) Log?.Invoke("[BT] INPUT recuperado.");
                         _lastFrame = input;
                         UsePad(pad => pad.Apply(input));

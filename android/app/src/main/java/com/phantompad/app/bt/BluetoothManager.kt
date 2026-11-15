@@ -141,8 +141,7 @@ class BluetoothManager(
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_EXPORTED
         )
-        _enabled.value = adapter?.isEnabled == true
-        refreshBonded()
+        refreshAdapter()
     }
 
     // ---------------------------------------------------------------- permisos
@@ -163,6 +162,11 @@ class BluetoothManager(
     }
 
     // ------------------------------------------------------------- dispositivos
+
+    fun refreshAdapter() {
+        _enabled.value = runCatching { adapter?.isEnabled == true }.getOrDefault(false)
+        refreshBonded()
+    }
 
     fun refreshBonded() {
         val bonded = try {

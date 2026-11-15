@@ -47,16 +47,18 @@ internal static class XInput
 /// <summary>Correlates distinct, intentional local reports with one Windows slot.</summary>
 internal sealed class XInputCorrelation
 {
-    private readonly HashSet<XInputReport> _reports = new();
-    private int _candidates = (1 << XInput.SlotCount) - 1;
+    private readonly HashSet<XInputReport>[] _matches =
+        Enumerable.Range(0, XInput.SlotCount).Select(_ => new HashSet<XInputReport>()).ToArray();
 
     public void Observe(XInputReport report, XInputSlot[] slots)
     {
-        if (report == default || !_reports.Add(report)) return;
+        if (report == default) return;
         for (int i = 0; i < slots.Length; i++)
         {
-            if (!slots[i].Connected || slots[i].Report.WithoutGuide() != report)
-                _candidates &= ~(1 << i);
+            if (slots[i].Connected && slots[i].Report.WithoutGuide() == report)
+                _matches[i].Add(report);
+            else
+                _matches[i].Clear();
         }
     }
 
@@ -64,10 +66,14 @@ internal sealed class XInputCorrelation
     {
         get
         {
-            if (_reports.Count < 3) return -1;
-            for (int i = 0; i < XInput.SlotCount; i++)
-                if (_candidates == 1 << i) return i;
-            return -1;
+            int index = -1;
+            for (int i = 0; i < _matches.Length; i++)
+            {
+                if (_matches[i].Count < 3) continue;
+                if (index != -1) return -1;
+                index = i;
+            }
+            return index;
         }
     }
 }

@@ -65,8 +65,9 @@ class HidTransport(
         if (ensureRegistered()) {
             discoverConnectedHost()
         } else {
-            emit(TransportEvent.Info("Perfil HID no disponible ahora. Consulta el diagnóstico."))
+            fail("Perfil HID no disponible. Android puede exigir mantener la app en primer plano.")
         }
+        Unit
     }
 
     override suspend fun connect(device: BluetoothDevice): Boolean = operations.withLock {
@@ -233,8 +234,7 @@ class HidTransport(
     }
 
     private fun matchesHost(host: BluetoothDevice): Boolean {
-        val address = expectedAddress ?: device?.address
-        return address == null || address == host.address
+        return acceptsHidHost(expectedAddress, device?.address, host.address)
     }
 
     private fun discoverConnectedHost() {
@@ -350,4 +350,9 @@ class HidTransport(
             0xC0.toByte()        // End Collection
         )
     }
+}
+
+internal fun acceptsHidHost(expected: String?, active: String?, reported: String): Boolean {
+    val selected = expected ?: active
+    return selected == null || selected == reported
 }

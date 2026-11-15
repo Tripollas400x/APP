@@ -32,7 +32,21 @@ public class RecoveryTests
             correlation.Observe(report, [new(0, other), new(1167, default), new(0, report), new(1167, default)]);
         }
         Assert.Equal(2, correlation.VerifiedIndex);
+    }
 
+    [Fact]
+    public void Slot_can_be_verified_after_enumeration_finishes_during_test()
+    {
+        var correlation = new XInputCorrelation();
+        var disconnected = new XInputSlot(1167, default);
+        correlation.Observe(new(0, 32, 0, 10, 0, 0, 0),
+            [disconnected, disconnected, disconnected, disconnected]);
+        for (short t = 1; t <= 3; t++)
+        {
+            var report = new XInputReport(0, 32, 0, t, 0, 0, 0);
+            correlation.Observe(report, [new(1167, default), new(0, report), new(1167, default), new(1167, default)]);
+        }
+        Assert.Equal(1, correlation.VerifiedIndex);
     }
 
     [Fact]

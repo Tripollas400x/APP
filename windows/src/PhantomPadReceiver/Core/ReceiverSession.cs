@@ -8,6 +8,8 @@ namespace PhantomPadReceiver.Core;
 
 internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationToken lifetime)
 {
+    private static readonly byte[] RumbleNotice = [];
+    private byte[]? _rumble;
     private readonly Channel<byte[]> _outbox = Channel.CreateBounded<byte[]>(32);
     private readonly CancellationTokenSource _cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
     private int _closed;
@@ -24,6 +26,7 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
     public long Inputs { get; private set; }
     public long ValidFrames { get; private set; }
     public long MissingInputs { get; private set; }
+    public long LateInputs { get; private set; }
     public int LastReadBytes { get; private set; }
     public int LastReadFrames { get; private set; }
     public double ReadGapMs { get; private set; }
@@ -33,6 +36,14 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
     public double? RttMs { get; private set; }
 
     public bool Send(byte[] data) => _outbox.Writer.TryWrite(data);
+
+    public void SendRumble(byte small, byte large)
+    {
+        var report = PhantomProtocol.BuildRumble(small, large);
+        if (Interlocked.Exchange(ref _rumble, report) == null && !_outbox.Writer.TryWrite(RumbleNotice))
+            Interlocked.Exchange(ref _rumble, null);
+    }
+
     public void Cancel()
     {
         if (Interlocked.Exchange(ref _closed, 1) != 0) return;
@@ -75,7 +86,9 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
         {
             await foreach (var data in _outbox.Reader.ReadAllAsync(_cts.Token).ConfigureAwait(false))
             {
-                writer.WriteBytes(data);
+                var report = ReferenceEquals(data, RumbleNotice) ? Interlocked.Exchange(ref _rumble, null) : data;
+                if (report == null) continue;
+                writer.WriteBytes(report);
                 await writer.StoreAsync().AsTask(_cts.Token).ConfigureAwait(false);
             }
         }
@@ -101,8 +114,14 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
         LastReadFrames++;
     }
 
-    public void RecordInput(InputFrame input, long arrival)
+    public bool RecordInput(InputFrame input, long arrival)
     {
+        ProcessingMs = Stopwatch.GetElapsedTime(arrival).TotalMilliseconds;
+        if (ProcessingMs >= InputWatchdog.TimeoutMs)
+        {
+            LateInputs++;
+            return false;
+        }
         Inputs++;
         if (Watchdog.LastInputAt != 0)
         {
@@ -115,7 +134,7 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
             if (delta is > 1 and < 32768) MissingInputs += delta - 1;
         }
         _lastInputSeq = input.Seq;
-        ProcessingMs = Stopwatch.GetElapsedTime(arrival).TotalMilliseconds;
+        return true;
     }
 
     public void Ping(long now)
@@ -129,7 +148,8 @@ internal sealed class ReceiverSession(int id, StreamSocket socket, CancellationT
     public void ReceivePong(ushort sequence, long arrival)
     {
         if (_pingSentAt == 0 || sequence != _pendingPing) return;
-        RttMs = Stopwatch.GetElapsedTime(_pingSentAt, arrival).TotalMilliseconds;
+        double elapsedMs = Stopwatch.GetElapsedTime(_pingSentAt, arrival).TotalMilliseconds;
+        RttMs = elapsedMs is >= 0 and < 3000 ? elapsedMs : null;
         _pingSentAt = 0;
     }
 }

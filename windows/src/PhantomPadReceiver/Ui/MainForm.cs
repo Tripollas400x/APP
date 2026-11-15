@@ -369,7 +369,7 @@ public sealed class MainForm : Form
             $"Índice bruto {index} · {stats.XInput}\n" +
             $"INPUT {stats.Inputs} ({fps:F0} fps) · Tramas válidas {stats.Frames} · {bytesPerSecond:F0} B/s · Último INPUT {age} · Failsafe {stats.Failsafes}\n" +
             $"Lectura {stats.ReadBytes} B / {stats.ReadFrames} tramas · Pausa {stats.ReadGapMs:F1} ms · INPUT {stats.InputGapMs:F1} / máx {stats.MaximumInputGapMs:F1} ms · Proceso {stats.ProcessingMs:F1} ms\n" +
-            $"CRC {stats.CrcErrors} · Tipos desconocidos {stats.UnknownFrames} · Descartados {stats.DroppedBytes} B · Pendientes {stats.PendingBytes} B · Saltos INPUT {stats.MissingInputs}";
+            $"CRC {stats.CrcErrors} · Tipos desconocidos {stats.UnknownFrames} · Descartados {stats.DroppedBytes} B · Pendientes {stats.PendingBytes} B · Saltos {stats.MissingInputs} · Tardíos {stats.LateInputs}";
         _infoLabel.ForeColor = stats.LinkDegraded || stats.Error != null ? WarnAmber : Color.Gainsboro;
         // Muestra el error del servidor completo una sola vez (no en cada tick).
         if (_engine.ServerError != null && _engine.ServerError != _lastShownServerError)

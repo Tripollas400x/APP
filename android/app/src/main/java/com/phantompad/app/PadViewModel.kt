@@ -177,6 +177,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
                     val wait = retry.nextDelayMs()
                     log.add("Reintento con ${device.name} en ${wait / 1000} s.")
                     delay(wait)
+                    if (!settings.value.autoReconnect) break
                 }
                 _transportState.value = TransportState.FAILED
             } catch (e: CancellationException) {
@@ -242,7 +243,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun notifyPermissionsGranted() {
-        bt.refreshBonded()
+        bt.refreshAdapter()
         ensureHidMonitor()
     }
 

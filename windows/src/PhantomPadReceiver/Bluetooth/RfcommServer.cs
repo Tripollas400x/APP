@@ -3,6 +3,7 @@ using System.Text;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Rfcomm;
 using Windows.Devices.Radios;
+using Windows.Foundation;
 using Windows.Networking.Sockets;
 using Windows.Storage.Streams;
 
@@ -42,9 +43,12 @@ public sealed class RfcommServer
 
     public event Action<string>? Log;
 
-    private RfcommServiceProvider? _provider;
-    private StreamSocketListener? _listener;
-    private CancellationToken _lifetime;
+    private volatile RfcommServiceProvider? _provider;
+    private volatile StreamSocketListener? _listener;
+    private TypedEventHandler<StreamSocketListener, StreamSocketListenerConnectionReceivedEventArgs>? _accept;
+    private Radio? _radio;
+    private TypedEventHandler<Radio, object>? _radioChanged;
+    private TaskCompletionSource _radioLost = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _connections;
 
     public bool IsAdvertising => _provider != null;
@@ -56,7 +60,6 @@ public sealed class RfcommServer
     {
         if (_provider != null) return;
         LastError = null;
-        _lifetime = ct;
 
         try
         {
@@ -75,13 +78,21 @@ public sealed class RfcommServer
             }
             try
             {
-                var radios = await Radio.GetRadiosAsync().AsTask(ct);
-                var btRadio = radios.FirstOrDefault(r => r.Kind == RadioKind.Bluetooth);
-                if (btRadio != null && btRadio.State != RadioState.On)
+                var btRadio = await adapter.GetRadioAsync().AsTask(ct);
+                if (btRadio != null)
                 {
-                    throw new RfcommServerException(
-                        $"[BT] El Bluetooth del PC está {(btRadio.State == RadioState.Disabled ? "APAGADO" : btRadio.State.ToString())}. " +
-                        "Actívalo en Configuración > Bluetooth y vuelve a pulsar Iniciar.");
+                    _radio = btRadio;
+                    var lost = _radioLost;
+                    _radioChanged = (radio, _) =>
+                    {
+                        if (radio.State != RadioState.On) lost.TrySetResult();
+                    };
+                    btRadio.StateChanged += _radioChanged;
+                    if (btRadio.State != RadioState.On)
+                    {
+                        throw new RfcommServerException(
+                            $"[BT] Bluetooth {btRadio.State}. Actívalo en Configuración > Bluetooth.");
+                    }
                 }
                 Log?.Invoke("[BT] Adaptador disponible (radio " + (btRadio?.Name ?? "Bluetooth") + ", estado " +
                             (btRadio?.State.ToString() ?? "desconocido") + ").");
@@ -124,7 +135,8 @@ public sealed class RfcommServer
             // ------------------------------------------------ 3) listener
             var listener = new StreamSocketListener();
             _listener = listener;
-            listener.ConnectionReceived += OnListenerConnectionReceived;
+            _accept = (_, args) => OnListenerConnectionReceived(listener, args, ct);
+            listener.ConnectionReceived += _accept;
             Log?.Invoke("[BT] Enlazando listener al canal RFCOMM...");
             try
             {
@@ -169,13 +181,13 @@ public sealed class RfcommServer
         }
     }
 
-    private async void OnListenerConnectionReceived(StreamSocketListener sender, StreamSocketListenerConnectionReceivedEventArgs args)
+    private async void OnListenerConnectionReceived(
+        StreamSocketListener listener, StreamSocketListenerConnectionReceivedEventArgs args, CancellationToken ct)
     {
         var socket = args.Socket;
         try
         {
-            var ct = _lifetime;
-            if (!ReferenceEquals(sender, _listener) || ct.IsCancellationRequested)
+            if (!ReferenceEquals(listener, _listener) || ct.IsCancellationRequested)
             {
                 socket.Dispose();
                 return;
@@ -207,17 +219,36 @@ public sealed class RfcommServer
         }
     }
 
+    public Task WaitForRadioLossAsync(CancellationToken ct) => _radioLost.Task.WaitAsync(ct);
+
     public void Stop()
     {
         var provider = _provider;
         var listener = _listener;
         _provider = null;
         _listener = null;
+        var radio = _radio;
+        _radio = null;
+        var radioChanged = _radioChanged;
+        _radioChanged = null;
+        if (radio != null && radioChanged != null)
+        {
+            try { radio.StateChanged -= radioChanged; }
+            catch (Exception ex) { Log?.Invoke("[BT] Cierre del monitor de radio: " + Detail(ex)); }
+        }
+        var accept = _accept;
+        _accept = null;
         if (provider == null && listener == null) return;
-        if (listener != null) listener.ConnectionReceived -= OnListenerConnectionReceived;
-        try { provider?.StopAdvertising(); } catch { /* al cerrar puede fallar y no importa */ }
-        try { listener?.Dispose(); } catch { }
-        Log?.Invoke("[BT] Servicio detenido (SDP retirado).");
+        if (listener != null && accept != null)
+        {
+            try { listener.ConnectionReceived -= accept; }
+            catch (Exception ex) { Log?.Invoke("[BT] Cierre del callback RFCOMM: " + Detail(ex)); }
+        }
+        try { provider?.StopAdvertising(); }
+        catch (Exception ex) { Log?.Invoke("[BT] Cierre de SDP: " + Detail(ex)); }
+        try { listener?.Dispose(); }
+        catch (Exception ex) { Log?.Invoke("[BT] Cierre del listener: " + Detail(ex)); }
+        Log?.Invoke("[BT] Servicio detenido.");
     }
 
     /// <summary>

@@ -1,9 +1,12 @@
 package com.phantompad.app
 
+import com.phantompad.app.gamepad.GamepadState
 import com.phantompad.app.gamepad.LatencyMeter
+import com.phantompad.app.protocol.ButtonId
 import com.phantompad.app.protocol.FrameParser
 import com.phantompad.app.protocol.InputSnapshot
 import com.phantompad.app.protocol.PhantomProtocol
+import com.phantompad.app.transport.acceptsHidHost
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -46,6 +49,30 @@ class ConnectionRecoveryTest {
         retry.reset()
         assertEquals(0, retry.attempts)
         assertEquals(1000L, retry.nextDelayMs())
+    }
+
+    @Test
+    fun losingTheSessionNeutralizesSimultaneousButtonsAxesAndTriggers() {
+        val state = GamepadState()
+        state.setButton(ButtonId.CROSS, true)
+        state.setButton(ButtonId.DPAD_UP, true)
+        state.setLeftStick(-0.75f, 0.5f)
+        state.setRightStick(0.5f, 1f)
+        state.setTriggerLeft(1f)
+        state.setTriggerRight(0.75f)
+        state.setTouch(true)
+        assertEquals(ButtonId.CROSS.bit or ButtonId.DPAD_UP.bit, state.snapshot().buttons)
+        state.reset()
+        assertEquals(InputSnapshot(), state.snapshot())
+    }
+
+    @Test
+    fun hidOnlyConsumesEventsForTheSelectedOrActiveHost() {
+        assertTrue(acceptsHidHost(null, null, "PC-A"))
+        assertFalse(acceptsHidHost(null, "PC-A", "PC-B"))
+        assertTrue(acceptsHidHost(null, "PC-A", "PC-A"))
+        assertFalse(acceptsHidHost("PC-B", "PC-A", "PC-A"))
+        assertTrue(acceptsHidHost("PC-B", "PC-A", "PC-B"))
     }
 
     @Test
