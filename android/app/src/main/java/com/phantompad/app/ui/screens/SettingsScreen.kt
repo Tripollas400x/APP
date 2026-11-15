@@ -126,13 +126,25 @@ fun SettingsScreen(vm: PadViewModel, onBack: () -> Unit) {
             SwitchRow("Reconexión automática", settings.autoReconnect) { checked ->
                 vm.updateSettings { s -> s.copy(autoReconnect = checked) }
             }
+            SwitchRow("L3/R3 al pulsar el stick (opcional)", settings.stickClickEnabled) { checked ->
+                vm.updateSettings { s -> s.copy(stickClickEnabled = checked) }
+            }
             SwitchRow("Modo ahorro energético (60 Hz máx.)", settings.energySaver) { checked ->
                 vm.updateSettings { s -> s.copy(energySaver = checked) }
             }
         }
 
         Text(
-            "Phantom Pad v0.1 - la latencia mostrada es el RTT real medido con PING/PONG.",
+            "Por defecto, mover un stick NO pulsa L3/R3: hay dos botones L3 y R3 " +
+                "dedicados junto al centro inferior. Activa esta opción solo si " +
+                "quieres además el clic del stick al presionarlo.",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+
+        Text(
+            "Phantom Pad v0.2.1 - la latencia mostrada es el RTT real medido con PING/PONG.",
             style = MaterialTheme.typography.labelSmall,
             color = TextSecondary,
             modifier = Modifier.padding(top = 8.dp)

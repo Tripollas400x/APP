@@ -116,8 +116,10 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
                 log.add("No se pudo resolver el dispositivo ${device.address}")
                 return@launch
             }
+            // Un discovery activo sabotea la conexión RFCOMM (SDP y canal):
+            // se cancela SIEMPRE antes de crear el transporte.
+            bt.stopScan()
             if (!bt.isBonded(device.address)) {
-                bt.stopScan()
                 log.add("Iniciando emparejamiento con ${device.name}...")
                 val bonded = bt.ensureBonded(target)
                 if (!bonded) {
@@ -194,7 +196,7 @@ class PadViewModel(app: Application) : AndroidViewModel(app) {
             if (mode == TransportModeWire.HID) {
                 HidTransport(getApplication(), log)
             } else {
-                RfcommTransport(viewModelScope, log, latency)
+                RfcommTransport(viewModelScope, bt, log, latency)
             }
         }
         transport = t

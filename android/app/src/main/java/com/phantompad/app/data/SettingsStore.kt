@@ -40,6 +40,7 @@ data class AppSettings(
     val keepAwake: Boolean = true,
     val energySaver: Boolean = false,
     val autoReconnect: Boolean = true,
+    val stickClickEnabled: Boolean = false,     // L3/R3 al pulsar el stick (desactivado: movía sin querer)
     val transportMode: TransportModeWire = TransportModeWire.RECEIVER,
     val padModeRequest: PadModeRequest = PadModeRequest.XBOX360,
     val activeProfile: ProfileId = ProfileId.PS_CLASSIC,
