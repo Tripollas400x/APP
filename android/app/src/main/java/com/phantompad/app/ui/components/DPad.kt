@@ -52,23 +52,30 @@ fun DPad(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    // Cada gesto sigue SIEMPRE al puntero que lo inició (por id):
+                    // un segundo dedo sobre la cruceta no secuestra el control.
+                    val activeId = down.id
                     var dirs = zonesFor(down.position, size)
                     dirs.forEach { onDirection(it, true) }
                     pressedDirs = dirs
                     down.consume()
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val active = event.changes.firstOrNull { it.pressed } ?: break
-                        val next = zonesFor(active.position, size)
-                        (next - dirs).forEach { onDirection(it, true) }
-                        (dirs - next).forEach { onDirection(it, false) }
-                        dirs = next
-                        pressedDirs = next
-                        if (event.changes.all { it.changedToUp() }) break
-                        event.changes.forEach { it.consume() }
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val tracked = event.changes.firstOrNull { it.id == activeId } ?: break
+                            val next = zonesFor(tracked.position, size)
+                            (next - dirs).forEach { onDirection(it, true) }
+                            (dirs - next).forEach { onDirection(it, false) }
+                            dirs = next
+                            pressedDirs = next
+                            if (tracked.changedToUp()) break
+                            tracked.consume()
+                        }
+                    } finally {
+                        // Al soltar, cancelarse o perder el dedo: nada queda presionado.
+                        dirs.forEach { onDirection(it, false) }
+                        pressedDirs = emptySet()
                     }
-                    dirs.forEach { onDirection(it, false) }
-                    pressedDirs = emptySet()
                 }
             }
     ) {

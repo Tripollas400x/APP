@@ -59,26 +59,32 @@ fun Joystick(
                     if (hapticsEnabled) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onPress(true)
                     val activeId = down.id
-                    applyPointer(down.position, size, deadzone, sensitivity) { k, x, y ->
-                        knob = k
-                        onMove(x, y)
-                    }
-                    down.consume()
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change: PointerInputChange =
-                            event.changes.firstOrNull { it.id == activeId } ?: continue
-                        if (change.changedToUp()) break
-                        applyPointer(change.position, size, deadzone, sensitivity) { k, x, y ->
+                    try {
+                        applyPointer(down.position, size, deadzone, sensitivity) { k, x, y ->
                             knob = k
                             onMove(x, y)
                         }
-                        change.consume()
+                        down.consume()
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change: PointerInputChange =
+                                event.changes.firstOrNull { it.id == activeId } ?: break
+                            if (change.changedToUp()) break
+                            applyPointer(change.position, size, deadzone, sensitivity) { k, x, y ->
+                                knob = k
+                                onMove(x, y)
+                            }
+                            change.consume()
+                        }
+                    } finally {
+                        // Al soltar o cancelarse el gesto (salir de pantalla,
+                        // desmontaje del control, pérdida de foco): el stick
+                        // vuelve al centro y ningún botón queda apretado.
+                        knob = Offset.Zero
+                        onMove(0f, 0f)
+                        onPress(false)
+                        pressed = false
                     }
-                    knob = Offset.Zero
-                    onMove(0f, 0f)
-                    onPress(false)
-                    pressed = false
                 }
             }
     ) {
