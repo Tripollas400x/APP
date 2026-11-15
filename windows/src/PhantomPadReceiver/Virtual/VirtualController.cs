@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using Nefarius.ViGEm.Client;
 using Nefarius.ViGEm.Client.Targets;
 using Nefarius.ViGEm.Client.Targets.DualShock4;
@@ -13,9 +14,21 @@ public enum PadMode
 }
 
 /// <summary>
+/// Error al crear el mando virtual con un mensaje de verdad: indica si el
+/// driver ViGEmBus está instalado y qué falló en cada intento, en vez de los
+/// mensajes vacíos o absurdos (p. ej. "La operación se completó
+/// correctamente") que lanza la librería de Nefarius.
+/// </summary>
+public sealed class VirtualPadException : Exception
+{
+    public VirtualPadException(string message) : base(message) { }
+}
+
+/// <summary>
 /// Mando virtual sobre ViGEmBus. Modo Xbox 360 (XInput, recomendado) y modo
-/// DualShock 4 (con las limitaciones conocidas documentadas en el README).
-/// Si el driver ViGEmBus no está instalado, Start() lanza y el motor informa.
+/// DualShock 4. Ante el fallo conocido "Xbox360UserIndexNotReported…" del
+/// bus (o cualquier otro error del plug), reintenta varias veces y, si el
+/// modo Xbox 360 sigue sin responder, cae automáticamente a DualShock 4.
 ///
 /// Con la API de Nefarius.ViGEm.Client 1.21.x las clases concretas son internas
 /// (solo se exponen IXbox360Controller/IDualShock4Controller) y cada llamada
@@ -31,10 +44,20 @@ public sealed class VirtualController : IDisposable
     private IXbox360Controller? _xbox;
     private IDualShock4Controller? _ds4;
 
+    private const int MaxAttempts = 5;
+    private const int RetryDelayMs = 500;
+
+    /// <summary>Avisos de progreso (reintentos, fallback) para el registro.</summary>
+    public event Action<string>? Status;
+
     /// <summary>Rumble del juego (motor pequeño, motor grande), ambos modos.</summary>
     public event Action<byte, byte>? RumbleRequested;
 
     public PadMode Mode { get; }
+
+    /// <summary>true si el modo pedido era Xbox 360 pero solo respondió DS4.</summary>
+    public bool FellBackToDs4 { get; private set; }
+
     public int UserIndex { get; private set; } = -1;
     public bool Ready => _xbox != null || _ds4 != null;
 
@@ -43,32 +66,165 @@ public sealed class VirtualController : IDisposable
         Mode = mode;
     }
 
+    /// <summary>El servicio ViGEmBus existe en el sistema (driver instalado).</summary>
+    public static bool DriverInstalled =>
+        Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus") != null;
+
     public void Start()
     {
-        _client = new ViGEmClient();
+        var errors = new List<string>();
+
         if (Mode == PadMode.Xbox360)
         {
-            var pad = _client.CreateXbox360Controller();
-            pad.FeedbackReceived += OnXboxFeedback;
-            pad.Connect();
-            _xbox = pad;
-            UserIndex = pad.UserIndex;
+            if (TryStartXbox360(errors))
+            {
+                return;
+            }
+
+            Status?.Invoke(
+                "Xbox 360 no respondió tras " + MaxAttempts + " intentos; probando DualShock 4 automáticamente..."
+            );
+            ResetPads();
+            if (TryStartDualShock4(errors))
+            {
+                FellBackToDs4 = true;
+                return;
+            }
         }
-        else
+        else if (TryStartDualShock4(errors))
         {
-            var pad = _client.CreateDualShock4Controller();
-#pragma warning disable CS0618
-            // Evento marcado obsoleto por el autor de la librería ("puede no
-            // comportarse como se espera"); la alternativa oficial exige un
-            // hilo bloqueado en AwaitRawOutputReport() y parsear el informe
-            // crudo. Se deja como mejor esfuerzo: el rumble garantizado está
-            // en modo Xbox 360. Limitación documentada en el README.
-            pad.FeedbackReceived += OnDualShock4Feedback;
-#pragma warning restore CS0618
-            pad.Connect();
-            _ds4 = pad;
-            UserIndex = -1; // la librería no expone el índice asignado para DS4
+            return;
         }
+
+        throw new VirtualPadException(BuildFailureMessage(errors));
+    }
+
+    private bool TryStartXbox360(List<string> errors)
+    {
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            try
+            {
+                var client = new ViGEmClient();
+                IXbox360Controller? pad = null;
+                try
+                {
+                    pad = client.CreateXbox360Controller();
+                    pad.FeedbackReceived += OnXboxFeedback;
+                    pad.Connect();
+                }
+                catch
+                {
+                    if (pad != null) pad.FeedbackReceived -= OnXboxFeedback;
+                    client.Dispose();
+                    throw;
+                }
+                _client = client;
+                _xbox = pad;
+                UserIndex = pad.UserIndex;
+                if (attempt > 1)
+                {
+                    Status?.Invoke("Xbox 360 conectado en el intento " + attempt + ".");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(Describe(attempt, "Xbox360", ex));
+                ResetPads();
+                if (attempt < MaxAttempts)
+                {
+                    Status?.Invoke(
+                        "Intento " + attempt + "/" + MaxAttempts + " de Xbox 360 falló (" +
+                        ex.GetType().Name + "); reintentando en " + RetryDelayMs + " ms..."
+                    );
+                    Thread.Sleep(RetryDelayMs);
+                }
+            }
+        }
+        return false;
+    }
+
+    private bool TryStartDualShock4(List<string> errors)
+    {
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            try
+            {
+                var client = new ViGEmClient();
+                IDualShock4Controller? pad = null;
+                try
+                {
+                    pad = client.CreateDualShock4Controller();
+#pragma warning disable CS0618
+                    // Evento marcado obsoleto por el autor de la librería ("puede no
+                    // comportarse como se espera"); la alternativa oficial exige un
+                    // hilo bloqueado en AwaitRawOutputReport() y parsear el informe
+                    // crudo. Se deja como mejor esfuerzo: el rumble garantizado está
+                    // en modo Xbox 360. Limitación documentada en el README.
+                    pad.FeedbackReceived += OnDualShock4Feedback;
+#pragma warning restore CS0618
+                    pad.Connect();
+                }
+                catch
+                {
+                    if (pad != null)
+                    {
+#pragma warning disable CS0618
+                        pad.FeedbackReceived -= OnDualShock4Feedback;
+#pragma warning restore CS0618
+                    }
+                    client.Dispose();
+                    throw;
+                }
+                _client = client;
+                _ds4 = pad;
+                UserIndex = -1; // la librería no expone el índice asignado para DS4
+                if (attempt > 1)
+                {
+                    Status?.Invoke("DualShock 4 conectado en el intento " + attempt + ".");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errors.Add(Describe(attempt, "DualShock4", ex));
+                ResetPads();
+                if (attempt < MaxAttempts)
+                {
+                    Thread.Sleep(RetryDelayMs);
+                }
+            }
+        }
+        return false;
+    }
+
+    private void ResetPads()
+    {
+        try { _xbox?.Disconnect(); } catch { /* driver puede ya no estar */ }
+        try { _ds4?.Disconnect(); } catch { /* idem */ }
+        _xbox = null;
+        _ds4 = null;
+        try { _client?.Dispose(); } catch { }
+        _client = null;
+    }
+
+    private static string Describe(int attempt, string target, Exception ex)
+    {
+        string msg = string.IsNullOrWhiteSpace(ex.Message) ? "(sin mensaje)" : ex.Message;
+        return $"{target} intento {attempt}: {ex.GetType().Name}: {msg}";
+    }
+
+    private static string BuildFailureMessage(List<string> errors)
+    {
+        string detail = string.Join(" | ", errors.TakeLast(3));
+        return DriverInstalled
+            ? "El driver ViGEmBus está instalado pero el bus no respondió a ningún intento. " +
+              "Cierra apps que también crean mandos virtuales (DS4Windows, reWASD, x360ce), " +
+              "y si sigue igual reinstala ViGEmBus desde https://vigem.org/downloads/ y reinicia. " +
+              "Detalles: " + detail
+            : "El driver ViGEmBus NO está instalado. Descárgalo de https://vigem.org/downloads/, " +
+              "instálalo y reinicia el PC. Detalles: " + detail;
     }
 
     private void OnXboxFeedback(object sender, Xbox360FeedbackReceivedEventArgs e)
@@ -202,11 +358,6 @@ public sealed class VirtualController : IDisposable
 
     public void Dispose()
     {
-        try { _xbox?.Disconnect(); } catch { /* driver puede ya no estar */ }
-        try { _ds4?.Disconnect(); } catch { /* idem */ }
-        _xbox = null;
-        _ds4 = null;
-        _client?.Dispose();
-        _client = null;
+        ResetPads();
     }
 }

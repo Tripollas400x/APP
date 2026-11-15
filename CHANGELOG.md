@@ -4,6 +4,29 @@ Todas las cambios notables de este proyecto se documentan aquí.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.1.4 / Receptor 0.2.0] - 2026-11-15
+
+### Corregido
+- Receptor Windows: "No se pudo crear el mando virtual" con mensajes
+  absurdos de la librería ViGEm ("La operación se completó correctamente",
+  `Xbox360UserIndexNotReportedException`) aun teniendo el driver instalado.
+  - `VirtualController`: reintento (5 intentos, 500 ms) del plug; si el
+    modo Xbox 360 no responde, **fallback automático a DualShock 4**.
+  - Detección real del driver ViGEmBus (servicio en el registro) con
+    mensajes útiles según esté instalado o no.
+  - `ReceiverEngine`: si el mando virtual falla, **reintenta solo cada 5 s**
+    en segundo plano; ya no hace falta pulsar Detener/Iniciar.
+- Teléfono no conectaba con el receptor: la app usaba canal RFCOMM seguro
+  y el receptor Windows publica PlainSocket (sin cifrado). `RfcommTransport`
+  ahora prueba seguro y, si falla, sin cifrado (fallback) con registro de
+  cada intento.
+
+### Mejorado
+- Interfaz del receptor (0.2.0): píldora de estado con punto de color,
+  registro con colores por severidad (RichTextBox), estado del driver al
+  arrancar, botones Limpiar/Copiar registro, versión visible, estadísticas
+  con modo efectivo (incluye fallback) y estilo de botones plano con hover.
+
 ## [0.1.3] - 2026-11-15
 
 ### Corregido

@@ -14,11 +14,17 @@ namespace PhantomPadReceiver.Core;
 /// Corazón del receptor: publica el servicio Bluetooth, decodifica los frames
 /// del teléfono, alimenta el mando virtual, responde PING para que el teléfono
 /// mida el RTT, reenvía rumble y aplica el failsafe anti-botones-atascados.
+/// Si el mando virtual falla al arrancar (driver ocupado, bus sin respuesta),
+/// reintenta automáticamente cada pocos segundos sin que el usuario tenga que
+/// pulsar Detener/Iniciar.
 /// </summary>
 public sealed class ReceiverEngine : IDisposable
 {
     public event Action<string>? Log;
     public event Action? StateChanged;
+
+    private const int PadRetryFirstDelayMs = 3000;
+    private const int PadRetryPeriodMs = 5000;
 
     private readonly RfcommServer _server = new();
     private VirtualController? _pad;
@@ -27,9 +33,12 @@ public sealed class ReceiverEngine : IDisposable
     private CancellationTokenSource? _linkCts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private Timer? _failsafeTimer;
+    private Timer? _padRetryTimer;
     private long _lastFrameTimestamp;
     private int _failsafeEvents;
     private long _frames;
+    private int _padRetryCount;
+    private volatile bool _running;
 
     public PadMode Mode { get; private set; } = PadMode.Xbox360;
     public bool PhoneConnected { get; private set; }
@@ -37,6 +46,11 @@ public sealed class ReceiverEngine : IDisposable
     public InputFrame LastFrame { get; private set; }
     public bool VigemReady => _pad?.Ready ?? false;
     public int VirtualPadIndex => _pad?.UserIndex ?? -1;
+    public bool PadFellBack => _pad?.FellBackToDs4 ?? false;
+
+    /// <summary>Mensaje del último fallo del mando virtual (null si está listo).</summary>
+    public string? PadError { get; private set; }
+
     public bool Advertising => _server.IsAdvertising;
     public long TotalFrames => Interlocked.Read(ref _frames);
     public int FailsafeEvents => _failsafeEvents;
@@ -46,19 +60,35 @@ public sealed class ReceiverEngine : IDisposable
     {
         StopLinkOnly();
         Mode = mode;
+        _running = true;
 
         _pad?.Dispose();
-        _pad = new VirtualController(mode);
-        _pad.RumbleRequested += OnRumbleRequested;
+        _pad = null;
+        _padRetryCount = 0;
+        PadError = null;
         try
         {
-            _pad.Start();
-            Log?.Invoke($"Mando virtual creado: {mode} (índice {VirtualPadIndex}).");
+            var pad = new VirtualController(mode);
+            pad.Status += m => Log?.Invoke(m);
+            pad.RumbleRequested += OnRumbleRequested;
+            pad.Start();
+            _pad = pad;
+            PadError = null;
+            Log?.Invoke(pad.FellBackToDs4
+                ? "Mando virtual listo: DualShock 4 (Xbox 360 no respondió; fallback automático)."
+                : $"Mando virtual listo: {mode} (índice {pad.UserIndex}).");
+        }
+        catch (VirtualPadException ex)
+        {
+            PadError = ex.Message;
+            Log?.Invoke("Mando virtual no disponible: " + ex.Message);
+            SchedulePadRetry();
         }
         catch (Exception ex)
         {
-            Log?.Invoke("No se pudo crear el mando virtual: " + ex.Message);
-            Log?.Invoke("Instala el driver ViGEmBus y pulsa Iniciar otra vez (docs/INSTALL_WINDOWS.md).");
+            PadError = $"{ex.GetType().Name}: {ex.Message}";
+            Log?.Invoke("Mando virtual no disponible (" + PadError + "). Reintentaré automáticamente.");
+            SchedulePadRetry();
         }
 
         _server.ConnectionAccepted = OnAccepted;
@@ -70,8 +100,56 @@ public sealed class ReceiverEngine : IDisposable
         StateChanged?.Invoke();
     }
 
+    /// <summary>Reintenta crear el mando virtual en segundo plano, sin que el
+    /// usuario tenga que tocar nada.</summary>
+    private void SchedulePadRetry()
+    {
+        if (!_running) return;
+        _padRetryTimer?.Dispose();
+        _padRetryTimer = new Timer(_ => TryRecreatePad(), null, PadRetryFirstDelayMs, PadRetryPeriodMs);
+    }
+
+    private void TryRecreatePad()
+    {
+        if (!_running) return;
+        if (_pad is { Ready: true }) { _padRetryTimer?.Dispose(); return; }
+
+        VirtualController? fresh = null;
+        try
+        {
+            fresh = new VirtualController(Mode);
+            fresh.Status += m => Log?.Invoke(m);
+            fresh.RumbleRequested += OnRumbleRequested;
+            fresh.Start();
+        }
+        catch (Exception ex)
+        {
+            fresh?.Dispose();
+            _padRetryCount++;
+            if (_padRetryCount == 1 || _padRetryCount % 4 == 0)
+            {
+                Log?.Invoke($"Reintento automático #{_padRetryCount} del mando virtual falló " +
+                            $"({ex.GetType().Name}); sigo probando cada {PadRetryPeriodMs / 1000} s...");
+            }
+            return;
+        }
+
+        _padRetryTimer?.Dispose();
+        _padRetryTimer = null;
+        var old = _pad;
+        _pad = fresh;
+        PadError = null;
+        _padRetryCount = 0;
+        try { old?.Dispose(); } catch { /* dispose tolerante */ }
+        Log?.Invoke("Mando virtual LISTO tras reintento automático. Ya puedes jugar.");
+        StateChanged?.Invoke();
+    }
+
     public void StopAll()
     {
+        _running = false;
+        _padRetryTimer?.Dispose();
+        _padRetryTimer = null;
         _failsafeTimer?.Dispose();
         _failsafeTimer = null;
         StopLinkOnly();
@@ -109,7 +187,10 @@ public sealed class ReceiverEngine : IDisposable
         Interlocked.Exchange(ref _frames, 0);
         _lastFrameTimestamp = Stopwatch.GetTimestamp();
         StateChanged?.Invoke();
-        Log?.Invoke("Teléfono conectado. Los estados llegan al mando virtual.");
+        Log?.Invoke(PhoneConnected && VigemReady
+            ? $"Teléfono conectado ({PhoneName}). Los estados llegan al mando virtual."
+            : $"Teléfono conectado ({PhoneName}), pero el mando virtual aún no está listo; " +
+              "en cuanto lo esté, los controles llegarán solos.");
 
         try
         {

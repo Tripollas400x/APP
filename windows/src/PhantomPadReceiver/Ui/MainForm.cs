@@ -6,40 +6,41 @@ using PhantomPadReceiver.Virtual;
 namespace PhantomPadReceiver.Ui;
 
 /// <summary>
-/// Ventana principal: estado de conexión, modo del mando, estadísticas y un
-/// panel de prueba que dibuja en vivo todos los botones, sticks y gatillos.
+/// Ventana principal (interfaz oscura estilo Phantom): píldora de estado en
+/// vivo, estado del driver ViGEmBus, estadísticas, panel de prueba que dibuja
+/// todos los controles en tiempo real y registro con colores por severidad.
 /// </summary>
 public sealed class MainForm : Form
 {
+    private const string AppVersion = "v0.2.0";
+
     private readonly ReceiverEngine _engine = new();
 
     private readonly ComboBox _modeCombo = new()
     {
         DropDownStyle = ComboBoxStyle.DropDownList,
-        Width = 150
+        Width = 150,
+        FlatStyle = FlatStyle.Flat,
+        BackColor = Color.FromArgb(28, 28, 40),
+        ForeColor = Color.Gainsboro
     };
 
-    private readonly Button _startButton = new() { Text = "Iniciar", Width = 90 };
-    private readonly Button _stopButton = new() { Text = "Detener", Width = 90, Enabled = false };
-    private readonly LinkLabel _helpLink = new() { Text = "Guía de instalación (driver ViGEmBus)", AutoSize = true };
-    private readonly Label _statusLabel = new()
-    {
-        AutoSize = true,
-        Font = new Font("Segoe UI", 11f, FontStyle.Bold)
-    };
-    private readonly Label _statsLabel = new() { AutoSize = true };
+    private readonly Button _startButton = new() { Text = "Iniciar", Width = 110, Height = 32 };
+    private readonly Button _stopButton = new() { Text = "Detener", Width = 110, Height = 32 };
+    private readonly LinkLabel _helpLink = new() { Text = "Guía del driver ViGEmBus", AutoSize = true };
+    private readonly Label _infoLabel = new() { AutoSize = true };
     private readonly Panel _padPanel = new() { Dock = DockStyle.Fill };
-    private readonly TextBox _logBox = new()
+    private readonly RichTextBox _logBox = new()
     {
-        Dock = DockStyle.Bottom,
-        Height = 150,
-        Multiline = true,
+        Dock = DockStyle.Fill,
         ReadOnly = true,
-        ScrollBars = ScrollBars.Vertical,
-        BackColor = Color.FromArgb(16, 16, 22),
-        ForeColor = Color.Gainsboro,
+        BackColor = Color.FromArgb(12, 12, 18),
+        BorderStyle = BorderStyle.None,
         Font = new Font("Consolas", 9f)
     };
+    private readonly Button _clearLogButton = new() { Text = "Limpiar", Width = 90, Height = 28 };
+    private readonly Button _copyLogButton = new() { Text = "Copiar registro", Width = 130, Height = 28 };
+    private readonly StatusPill _pill = new() { Width = 340, Height = 40 };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
 
     private long _lastFrames;
@@ -47,8 +48,12 @@ public sealed class MainForm : Form
 
     private static readonly Color AccentColor = Color.FromArgb(158, 123, 255);
     private static readonly Color PanelDark = Color.FromArgb(10, 10, 14);
+    private static readonly Color HeaderDark = Color.FromArgb(14, 14, 20);
     private static readonly Color ControlOff = Color.FromArgb(40, 40, 56);
-    private static readonly Color ControlOn = Color.FromArgb(76, 175, 80);
+    private static readonly Color ControlHover = Color.FromArgb(56, 56, 78);
+    private static readonly Color OkGreen = Color.FromArgb(76, 175, 80);
+    private static readonly Color WarnAmber = Color.FromArgb(255, 183, 77);
+    private static readonly Color ErrRed = Color.FromArgb(239, 83, 80);
 
     private static readonly (PadButtons Button, string Label, float Fx, float Fy, Color Color)[] FaceButtons =
     {
@@ -60,9 +65,9 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Phantom Pad Receiver";
-        Size = new Size(960, 700);
-        MinimumSize = new Size(840, 580);
+        Text = "Phantom Pad Receiver " + AppVersion;
+        Size = new Size(980, 720);
+        MinimumSize = new Size(860, 600);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = PanelDark;
         Font = new Font("Segoe UI", 9.5f);
@@ -70,41 +75,74 @@ public sealed class MainForm : Form
 
         _modeCombo.DataSource = Enum.GetValues<PadMode>();
 
-        // ---- cabecera
-        var top = new Panel { Dock = DockStyle.Top, Height = 150, BackColor = Color.FromArgb(14, 14, 20) };
+        // ---------------------------------------------------------- cabecera
+        var top = new Panel { Dock = DockStyle.Top, Height = 186, BackColor = HeaderDark };
+
         var title = new Label
         {
             Text = "PHANTOM PAD RECEIVER",
             AutoSize = true,
-            Font = new Font("Segoe UI", 14f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 15f, FontStyle.Bold),
             ForeColor = AccentColor,
             Location = new Point(16, 10)
         };
-        var modeLabel = new Label { Text = "Modo del mando virtual:", AutoSize = true, Location = new Point(16, 52) };
-        _modeCombo.Location = new Point(170, 48);
-        _startButton.Location = new Point(340, 46);
-        _stopButton.Location = new Point(438, 46);
-        _helpLink.Location = new Point(545, 51);
-        _statusLabel.Location = new Point(16, 86);
-        _statsLabel.Location = new Point(16, 116);
-        _statsLabel.ForeColor = Color.Gainsboro;
+        var version = new Label
+        {
+            Text = AppVersion,
+            AutoSize = true,
+            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(120, 110, 160),
+            Location = new Point(305, 20)
+        };
+        var subtitle = new Label
+        {
+            Text = "Bluetooth del teléfono → mando virtual (ViGEmBus) en Windows",
+            AutoSize = true,
+            ForeColor = Color.Silver,
+            Location = new Point(16, 44)
+        };
+
+        var modeLabel = new Label { Text = "Modo:", AutoSize = true, Location = new Point(16, 82) };
+        _modeCombo.Location = new Point(60, 78);
+        _startButton.Location = new Point(224, 74);
+        _stopButton.Location = new Point(342, 74);
+        _helpLink.Location = new Point(468, 81);
+
+        _pill.Location = new Point(16, 118);
+        _infoLabel.Location = new Point(16, 160);
+        _infoLabel.ForeColor = Color.Gainsboro;
 
         top.Controls.Add(title);
+        top.Controls.Add(version);
+        top.Controls.Add(subtitle);
         top.Controls.Add(modeLabel);
         top.Controls.Add(_modeCombo);
         top.Controls.Add(_startButton);
         top.Controls.Add(_stopButton);
         top.Controls.Add(_helpLink);
-        top.Controls.Add(_statusLabel);
-        top.Controls.Add(_statsLabel);
+        top.Controls.Add(_pill);
+        top.Controls.Add(_infoLabel);
+
+        // --------------------------------------------------------------- log
+        var logPanel = new Panel { Dock = DockStyle.Bottom, Height = 196, BackColor = PanelDark };
+        var logButtons = new Panel { Dock = DockStyle.Top, Height = 38, BackColor = HeaderDark };
+        _clearLogButton.Location = new Point(8, 5);
+        _copyLogButton.Location = new Point(106, 5);
+        StyleButton(_clearLogButton);
+        StyleButton(_copyLogButton);
+        logButtons.Controls.Add(_clearLogButton);
+        logButtons.Controls.Add(_copyLogButton);
+        logPanel.Controls.Add(_logBox);
+        logPanel.Controls.Add(logButtons);
 
         _padPanel.BackColor = PanelDark;
         _padPanel.Paint += PadPanel_Paint;
 
         Controls.Add(top);
-        Controls.Add(_logBox);
+        Controls.Add(logPanel);
         Controls.Add(_padPanel);
 
+        // ---------------------------------------------------------- eventos
         _startButton.Click += async (s, e) =>
         {
             _startButton.Enabled = false;
@@ -138,6 +176,16 @@ public sealed class MainForm : Form
             }
         };
 
+        _clearLogButton.Click += (s, e) => _logBox.Clear();
+        _copyLogButton.Click += (s, e) =>
+        {
+            if (_logBox.Text.Length > 0)
+            {
+                Clipboard.SetText(_logBox.Text);
+                AppendLog("Registro copiado al portapapeles.");
+            }
+        };
+
         _uiTimer.Tick += (s, e) =>
         {
             UpdateStats();
@@ -154,20 +202,57 @@ public sealed class MainForm : Form
             _engine.Dispose();
         };
 
-        AppendLog("Phantom Pad Receiver v0.1. Empareja el teléfono con el PC y pulsa Iniciar.");
+        AppendLog($"Phantom Pad Receiver {AppVersion}. Empareja el teléfono con el PC y pulsa Iniciar.");
+        bool driver = VirtualController.DriverInstalled;
+        AppendLog(
+            driver
+                ? "Driver ViGEmBus: detectado (OK)."
+                : "Driver ViGEmBus: NO detectado. Instálalo desde https://vigem.org/downloads/ y reinicia el PC.",
+            driver ? LogSeverity.Ok : LogSeverity.Error
+        );
+        if (!driver)
+        {
+            _helpLink.LinkBehavior = LinkBehavior.HoverUnderline;
+        }
         UpdateUi();
+    }
+
+    // ------------------------------------------------------------------- UI
+
+    private static void StyleButton(Button b)
+    {
+        b.FlatStyle = FlatStyle.Flat;
+        b.FlatAppearance.BorderColor = AccentColor;
+        b.FlatAppearance.BorderSize = 1;
+        b.FlatAppearance.MouseOverBackColor = ControlHover;
+        b.BackColor = ControlOff;
+        b.ForeColor = Color.White;
+        b.Cursor = Cursors.Hand;
     }
 
     private void UpdateUi()
     {
-        _statusLabel.Text = _engine.PhoneConnected
-            ? "Conectado"
-            : _engine.Advertising ? "Esperando teléfono..." : "Detenido";
-        _statusLabel.ForeColor = _engine.PhoneConnected
-            ? ControlOn
-            : _engine.Advertising ? Color.FromArgb(255, 183, 77) : Color.Silver;
+        bool connected = _engine.PhoneConnected;
+        bool advertising = _engine.Advertising;
 
-        var busy = _engine.Advertising;
+        if (connected)
+        {
+            _pill.SetStatus(StatusPill.State.Connected, "Conectado a " + _engine.PhoneName);
+        }
+        else if (advertising)
+        {
+            _pill.SetStatus(StatusPill.State.Waiting, "Esperando teléfono… (Bluetooth visible)");
+        }
+        else if (_engine.PadError != null)
+        {
+            _pill.SetStatus(StatusPill.State.Error, "Mando virtual no disponible — reintentando…");
+        }
+        else
+        {
+            _pill.SetStatus(StatusPill.State.Idle, "Detenido");
+        }
+
+        var busy = advertising;
         _startButton.Enabled = !busy;
         _stopButton.Enabled = busy;
         _modeCombo.Enabled = !busy;
@@ -181,17 +266,72 @@ public sealed class MainForm : Form
         _lastFrames = _engine.TotalFrames;
         _lastFpsAt = now;
 
-        string padState = !_engine.VigemReady ? "NO (instala ViGEmBus)"
-            : _engine.VirtualPadIndex >= 0 ? $"#{_engine.VirtualPadIndex}"
-            : "DS4"; // la librería ViGEm no expone el índice en modo DualShock 4
-        _statsLabel.Text =
-            $"Dispositivo: {_engine.PhoneName}    Modo: {_engine.Mode}    Mando virtual: {padState}    " +
-            $"Frames: {_engine.TotalFrames}    {fps:F0} fps    Failsafe: {_engine.FailsafeEvents}";
+        string pad;
+        if (!_engine.VigemReady)
+        {
+            pad = _engine.PadError != null ? "no listo (reintentando…)" : "no iniciado";
+        }
+        else if (_engine.PadFellBack)
+        {
+            pad = "DualShock 4 (fallback)";
+        }
+        else if (_engine.VirtualPadIndex >= 0)
+        {
+            pad = $"Xbox360 #{_engine.VirtualPadIndex}";
+        }
+        else
+        {
+            pad = "DualShock 4";
+        }
+
+        string driver = VirtualController.DriverInstalled ? "OK" : "NO instalado";
+        _infoLabel.Text =
+            $"Mando: {pad}    Driver ViGEmBus: {driver}    Teléfono: {_engine.PhoneName}    " +
+            $"Frames: {_engine.TotalFrames} ({fps:F0} fps)    Failsafe: {_engine.FailsafeEvents}";
+        _infoLabel.ForeColor = _engine.VigemReady ? Color.Gainsboro : WarnAmber;
     }
 
-    private void AppendLog(string message)
+    private enum LogSeverity { Info, Ok, Warn, Error }
+
+    private void AppendLog(string message) => AppendLog(message, Classify(message));
+
+    private static LogSeverity Classify(string m)
     {
-        _logBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+        if (m.Contains("ERROR") || m.Contains("FALLO") || m.Contains("no disponible") ||
+            m.Contains("NO detectado") || m.Contains("no respondió") || m.Contains("falló"))
+        {
+            return LogSeverity.Error;
+        }
+        if (m.Contains("LISTO") || m.Contains("Conectado") || m.Contains("conectado desde") ||
+            m.Contains("publicado") || m.Contains("OK"))
+        {
+            return LogSeverity.Ok;
+        }
+        if (m.Contains("Reintento") || m.Contains("reintent") || m.Contains("Esperando") ||
+            m.Contains("Sin PONG") || m.Contains("Failsafe") || m.Contains("probando"))
+        {
+            return LogSeverity.Warn;
+        }
+        return LogSeverity.Info;
+    }
+
+    private void AppendLog(string message, LogSeverity severity)
+    {
+        Color color = severity switch
+        {
+            LogSeverity.Ok => OkGreen,
+            LogSeverity.Warn => WarnAmber,
+            LogSeverity.Error => ErrRed,
+            _ => Color.Gainsboro
+        };
+        _logBox.SelectionStart = _logBox.TextLength;
+        _logBox.SelectionLength = 0;
+        _logBox.SelectionColor = Color.FromArgb(110, 110, 130);
+        _logBox.AppendText($"[{DateTime.Now:HH:mm:ss}] ");
+        _logBox.SelectionColor = color;
+        _logBox.AppendText(message + Environment.NewLine);
+        _logBox.SelectionStart = _logBox.TextLength;
+        _logBox.ScrollToCaret();
     }
 
     // ------------------------------------------------------------- panel test
@@ -246,7 +386,7 @@ public sealed class MainForm : Form
         DrawRounded(g, w * 0.84f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.R1), "R1");
         DrawRounded(g, w * 0.44f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.Share), "SHARE");
         DrawRounded(g, w * 0.56f - bw / 2, h * 0.09f, bw, bh, f.Buttons.HasFlag(PadButtons.Options), "OPTIONS");
-        DrawRounded(g, w * 0.50f - bw / 2, h * 0.19f, bw, bh, f.Buttons.HasFlag(PadButtons.Ps), "PS");
+        DrawRounded(g, w * 0.50f - h * 0.03f, h * 0.19f, bw, bh, f.Buttons.HasFlag(PadButtons.Ps), "PS");
     }
 
     private static void DrawRounded(Graphics g, float x, float y, float w, float h, bool on, string label)
@@ -350,5 +490,75 @@ public sealed class MainForm : Form
         using var text = new SolidBrush(Color.Silver);
         using var font = new Font("Segoe UI", 10f, FontStyle.Bold);
         g.DrawString(label, font, text, cx - 6, cy - r - 20);
+    }
+
+    /// <summary>Píldora de estado: punto de color + texto, estilo Phantom.</summary>
+    private sealed class StatusPill : Control
+    {
+        public enum State { Idle, Waiting, Connected, Error }
+
+        private State _state = State.Idle;
+        private string _text = "Detenido";
+
+        private static readonly Color IdleColor = Color.Silver;
+        private static readonly Color WaitingColor = Color.FromArgb(255, 183, 77);
+        private static readonly Color ConnectedColor = Color.FromArgb(76, 175, 80);
+        private static readonly Color ErrorColor = Color.FromArgb(239, 83, 80);
+        private static readonly Color PillBack = Color.FromArgb(22, 22, 32);
+
+        public StatusPill()
+        {
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+        }
+
+        public void SetStatus(State state, string text)
+        {
+            if (_state == state && _text == text) return;
+            _state = state;
+            _text = text;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+            var color = _state switch
+            {
+                State.Connected => ConnectedColor,
+                State.Waiting => WaitingColor,
+                State.Error => ErrorColor,
+                _ => IdleColor
+            };
+
+            using var back = new SolidBrush(PillBack);
+            using var path = new System.Drawing.Drawing2D.GraphicsPath();
+            int radius = Height / 2;
+            path.AddArc(0, 0, radius, radius, 180, 90);
+            path.AddArc(Width - radius, 0, radius, radius, 270, 90);
+            path.AddArc(Width - radius, Height - radius, radius, radius, 0, 90);
+            path.AddArc(0, Height - radius, radius, radius, 90, 90);
+            path.CloseFigure();
+            g.FillPath(back, path);
+            using var border = new Pen(Color.FromArgb(50, 50, 70), 1f);
+            g.DrawPath(border, path);
+
+            // punto con halo
+            float dotX = 22, dotY = Height / 2f, dotR = 6;
+            using (var halo = new SolidBrush(Color.FromArgb(40, color)))
+            {
+                g.FillEllipse(halo, dotX - dotR - 4, dotY - dotR - 4, (dotR + 4) * 2, (dotR + 4) * 2);
+            }
+            using var dot = new SolidBrush(color);
+            g.FillEllipse(dot, dotX - dotR, dotY - dotR, dotR * 2, dotR * 2);
+
+            using var text = new SolidBrush(color);
+            using var font = new Font("Segoe UI", 11f, FontStyle.Bold);
+            var size = g.MeasureString(_text, font);
+            g.DrawString(_text, font, text, dotX + dotR + 10, dotY - size.Height / 2);
+        }
     }
 }

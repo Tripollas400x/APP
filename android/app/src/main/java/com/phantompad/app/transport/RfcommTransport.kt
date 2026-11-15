@@ -55,9 +55,31 @@ class RfcommTransport(
         emit(TransportEvent.Info("Conectando con ${device.safeDisplayName()}..."))
         return try {
             withContext(Dispatchers.IO) {
-                val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                socket = s
-                s.connect()
+                // El receptor Windows publica el canal con PlainSocket (sin
+                // cifrado). El canal seguro de Android puede ser rechazado por
+                // eso: probamos seguro y, si falla, sin cifrado.
+                var connected: BluetoothSocket? = null
+                var lastError: IOException? = null
+                for ((label, make) in listOf(
+                    "seguro" to { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+                    "sin cifrado" to { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) }
+                )) {
+                    try {
+                        log.add("RFCOMM: abriendo canal $label...")
+                        val s = make()
+                        socket = s
+                        s.connect()
+                        connected = s
+                        log.add("RFCOMM: canal $label establecido.")
+                        break
+                    } catch (e: IOException) {
+                        lastError = e
+                        runCatching { socket?.close() }
+                        socket = null
+                        delay(300) // dejar que la pila BT enfríe entre intentos
+                    }
+                }
+                val s = connected ?: throw lastError ?: IOException("No se pudo abrir el canal RFCOMM")
                 out = DataOutputStream(BufferedOutputStream(s.outputStream))
                 _deviceName.value = device.safeDisplayName()
                 startReader(s)
