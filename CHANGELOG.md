@@ -4,6 +4,90 @@ Todas las cambios notables de este proyecto se documentan aquí.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto sigue [Versionado Semántico](https://semver.org/lang/es/).
 
+## [0.2.1 / Receptor 0.2.1] - 2026-11-15 — BLUETOOTH & CONTROLLER FIX
+
+### Corregido — Receptor Windows
+- **Xbox 360: `Xbox360UserIndexNotReportedException` ya no destruye el mando.**
+  Verificado contra Nefarius.ViGEm.Client 1.21.256 decompilado: `UserIndex`
+  solo lo asigna la notificación asíncrona del bus (cuando Windows enumera el
+  mando virtual XUSB); leerlo justo tras `Connect()` lanza y el bucle antiguo
+  de 5 intentos con recreación nunca le daba tiempo a llegar.
+  - `VirtualController`: creación, conexión y consulta del índice separadas.
+    Si `Connect()` no lanza, el mando queda enchufado y operativo; el índice
+    se sondea en segundo plano (tolerante, "índice pendiente") sin recrear
+    nada. El fallback a DS4 SOLO ocurre si el plug de Xbox 360 falla de
+    verdad (bus no encontrado, sin hueco...).
+  - Diagnóstico completo: tipo de excepción, mensaje real, HRESULT y stack
+    (primera línea) en cada intento.
+- **Servicio RFCOMM con errores reales y registro paso a paso** (`[BT] ...`):
+  adaptador/radio, creación del servicio, SDP, enlace del listener y
+  publicación quedan registrados; cada fallo incluye tipo + mensaje +
+  HRESULT (los errores WinRT llegan con `Message` vacío: el `ERROR:` sin
+  datos ya no puede ocurrir).
+- **SDP corregido**: el atributo 0x0100 (nombre de servicio) ahora se codifica
+  como elemento SDP (0x25 + longitud + UTF-8); antes se escribía la cadena en
+  bruto y el registro no parseaba bien en Android.
+- Protección del listener cambiada de `PlainSocket` a
+  `BluetoothEncryptionAllowNullAuthentication` (acepta clientes Android
+  seguros y sin cifrado; nivel de la muestra oficial de Microsoft).
+- Sesiones con ID: al reemplazarse una conexión, el cierre tardío de la
+  sesión vieja ya no marca como desconectada a la nueva.
+- Watchdog (failsafe) de una sola vez por pérdida con aviso de recuperación;
+  ya no repite el aviso cada 500 ms.
+- El servicio Bluetooth y el mando virtual son independientes: si ViGEmBus
+  falla, el receptor sigue recibiendo y mostrando los controles; si BT falla,
+  reintenta solo cada 5 s.
+- Parser incremental `FramePipe` en el receptor: frames fragmentados o
+  concatenados, basura y CRC inválido se resincronizan sin perder frames.
+- Reintentos del mando virtual reducidos a 3 por llamada (el reintento real
+  lo hace el motor en segundo plano cada 5 s).
+
+### Corregido — App Android
+- **RFCOMM**: el descubrimiento Bluetooth se cancela (y se espera a que la
+  pila lo detenga) ANTES de `socket.connect()`; timeout real de conexión
+  (12 s, `connect()` puede bloquearse indefinidamente) cerrando el socket;
+  motivo real de cada intento en el registro; una sola conexión a la vez.
+- **RFCOMM**: el hilo lector usa el parser incremental `FrameParser`
+  (espejo del receptor): fragmentados, concatenados y CRC inválido.
+- **RELEASE_ALL consumido completo** (5 bytes; antes se leían 3 de cuerpo y
+  se desincronizaba el stream si el receptor lo enviaba).
+- **HID**: registro con mutex (una sola operación en curso); la carrera de
+  confirmación (Windows confirma antes de que la app empiece a esperar) se
+  cubre con un flag y no produce timeouts falsos; el host exigido es el
+  pedido exacto (eliminado el fallback a "el primero conectado"); hat switch
+  con diagonales correctas (SE=3, SO=5; antes SE=2, SO=3).
+- **HID**: diagnóstico por etapas para distinguir bloqueo de ColorOS de
+  cualquier otro fallo (perfil no disponible, registro rechazado, conexión
+  rechazada, desregistro del sistema).
+- **BluetoothManager**: receivers del sistema con `RECEIVER_EXPORTED`
+  (broadcasts protegidos; en ColorOS la entrega a NOT_EXPORTED es
+  inconsistente); `ACTION_DISCOVERY_FINISHED` cierra el escaneo y refresca
+  estados; registro doble evitado; `startDiscovery()` fallido ya no deja
+  estado colgado; el emparejamiento solo responde al dispositivo pedido.
+- **Controles**: mover un stick ya NO activa L3/R3 (nuevo ajuste opcional
+  "L3/R3 al pulsar el stick", desactivado por defecto) y hay dos botones
+  L3 y R3 dedicados en pantalla; la cruceta sigue al dedo que inició el
+  gesto (por pointer id, no "el primero presionado"); joysticks y cruceta
+  liberan todo su estado ante cancelación o pérdida del dedo (try/finally).
+- **InputHub**: la cancelación del bucle ya no deja botones pegados:
+  RELEASE_ALL sale con `NonCancellable` en el finally.
+
+### Añadido
+- Receptor: botón **Prueba local (joy.cpl)** que barre ejes, gatillos y
+  botones por el mando virtual sin necesidad de teléfono (Test A); botón
+  **Guardar registro...** que exporta el log a archivo sin datos privados;
+  estadísticas de frames rechazados y estado del servicio BT en la línea de
+  estado.
+- App: tarjeta de diagnóstico Bluetooth (adaptador, permisos, escaneo,
+  emparejados, UUID del servicio), frames enviados y botón de copiar registro.
+- Tests: `FramePipeTests.cs` (8 casos, incl. volumen mixto de 200 frames) y
+  `FrameParserTest.kt` (8 casos espejo). Parser validado también con runner
+  local (12/12 PASS).
+
+### Corregido — CI
+- Los dos workflows tenían `branches: ain]` (YAML corrupto): los push/PR a
+  `main` NO disparaban CI. Corregido a `[main]`.
+
 ## [0.1.4 / Receptor 0.2.0] - 2026-11-15
 
 ### Corregido
