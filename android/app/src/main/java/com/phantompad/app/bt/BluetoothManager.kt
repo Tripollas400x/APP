@@ -3,7 +3,7 @@ package com.phantompad.app.bt
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothManager as SystemBluetoothManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -28,6 +28,15 @@ data class BtDeviceUi(
  * Fachada de Bluetooth: permisos, estado del adaptador, descubrimiento,
  * emparejamiento y acceso a dispositivos. No gestiona sockets (eso es de los
  * transportes).
+ *
+ * Detalles de registro de receivers: los tres broadcasts que escuchamos
+ * (ACTION_STATE_CHANGED, ACTION_FOUND, ACTION_BOND_STATE_CHANGED y
+ * ACTION_DISCOVERY_FINISHED) son broadcasts PROTEGIDOS del sistema: solo el
+ * sistema puede enviarlos. Se registran con RECEIVER_EXPORTED porque en
+ * capas de fabricante (ColorOS incluida) la entrega a receivers
+ * NOT_EXPORTED es inconsistente para broadcasts de sistema, y usar EXPORTED
+ * aquí no abre superficie de ataque (la acción está protegida por la
+ * plataforma).
  */
 @SuppressLint("MissingPermission") // se comprueban permisos en la UI antes de usar
 class BluetoothManager(
@@ -36,7 +45,7 @@ class BluetoothManager(
 ) {
 
     private val systemManager =
-        context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        context.getSystemService(Context.BLUETOOTH_SERVICE) as? SystemBluetoothManager
 
     val adapter: BluetoothAdapter? get() = systemManager?.adapter
 
@@ -48,6 +57,15 @@ class BluetoothManager(
 
     @Volatile
     private var scanning = false
+
+    @Volatile
+    private var foundRegistered = false
+
+    @Volatile
+    private var bondRegistered = false
+
+    @Volatile
+    private var bondAddress: String? = null
 
     private var bondContinuation: CancellableContinuation<Boolean>? = null
 
@@ -63,16 +81,29 @@ class BluetoothManager(
 
     private val foundReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            if (intent?.action != BluetoothDevice.ACTION_FOUND) return
-            val device: BluetoothDevice? =
-                if (Build.VERSION.SDK_INT >= 33) {
-                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            when (intent?.action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device: BluetoothDevice? =
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                        }
+                    device ?: return
+                    addDevice(device)
                 }
-            device ?: return
-            addDevice(device)
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                    // Fin de escaneo: cerrar el receiver y refrescar estados de
+                    // emparejamiento (puede haber cambiado durante el escaneo).
+                    if (scanning) {
+                        scanning = false
+                        unregisterFound()
+                        refreshBonded()
+                        log.add("Escaneo terminado: ${_devices.value.size} dispositivos en la lista.")
+                    }
+                }
+            }
         }
     }
 
@@ -87,11 +118,19 @@ class BluetoothManager(
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                 }
             val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
-            if (state == BluetoothDevice.BOND_BONDED) {
-                device?.let { addDevice(it) }
-                resumeBond(true)
-            } else if (state == BluetoothDevice.BOND_NONE) {
-                resumeBond(false)
+            // Solo la petición en curso resuelve la espera; otros cambios de
+            // emparejamiento del entorno no interfieren.
+            if (device?.address != bondAddress) {
+                if (state == BluetoothDevice.BOND_BONDED) device?.let { addDevice(it) }
+                return
+            }
+            when (state) {
+                BluetoothDevice.BOND_BONDED -> {
+                    device?.let { addDevice(it) }
+                    refreshBonded()
+                    resumeBond(true)
+                }
+                BluetoothDevice.BOND_NONE -> resumeBond(false)
             }
         }
     }
@@ -100,7 +139,7 @@ class BluetoothManager(
         ContextCompat.registerReceiver(
             context, stateReceiver,
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
-            ContextCompat.RECEIVER_NOT_EXPORTED
+            ContextCompat.RECEIVER_EXPORTED
         )
         _enabled.value = adapter?.isEnabled == true
         refreshBonded()
@@ -148,41 +187,72 @@ class BluetoothManager(
 
     fun enableIntent(): Intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
 
+    /** ¿Hay un descubrimiento en curso? (los transportes lo consultan) */
+    fun isDiscovering(): Boolean = try {
+        adapter?.isDiscovering == true
+    } catch (_: SecurityException) {
+        false
+    }
+
     // --------------------------------------------------------------- escaneo
 
     fun startScan() {
         val a = adapter ?: return
         if (scanning) return
-        ContextCompat.registerReceiver(
-            context, foundReceiver,
-            IntentFilter(BluetoothDevice.ACTION_FOUND),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        if (!foundRegistered) {
+            ContextCompat.registerReceiver(
+                context, foundReceiver,
+                IntentFilter(BluetoothDevice.ACTION_FOUND).apply {
+                    addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                },
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            foundRegistered = true
+        }
         scanning = true
+        refreshBonded() // estados de emparejamiento frescos antes de listar
         log.add("Buscando dispositivos Bluetooth...")
-        try {
+        val started = try {
             a.startDiscovery()
         } catch (e: Exception) {
             log.add("No se pudo iniciar el escaneo: ${e.message}")
+            false
+        }
+        if (!started) {
+            // startDiscovery puede fallar en silencio: avisar y limpiar.
+            scanning = false
+            unregisterFound()
+            log.add("Escaneo no iniciado (permisos de ubicación o Bluetooth ocupado).")
         }
     }
 
     fun stopScan() {
         if (!scanning) return
         scanning = false
-        runCatching { context.unregisterReceiver(foundReceiver) }
+        unregisterFound()
         runCatching { adapter?.cancelDiscovery() }
+    }
+
+    private fun unregisterFound() {
+        if (foundRegistered) {
+            runCatching { context.unregisterReceiver(foundReceiver) }
+            foundRegistered = false
+        }
     }
 
     // ------------------------------------------------------------ emparejado
 
     suspend fun ensureBonded(device: BluetoothDevice, timeoutMs: Long = 20_000): Boolean {
         if (device.bondState == BluetoothDevice.BOND_BONDED) return true
-        ContextCompat.registerReceiver(
-            context, bondReceiver,
-            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        if (!bondRegistered) {
+            ContextCompat.registerReceiver(
+                context, bondReceiver,
+                IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            bondRegistered = true
+        }
+        bondAddress = device.address
         val result = withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine { cont ->
                 bondContinuation = cont
@@ -199,13 +269,20 @@ class BluetoothManager(
             }
         } ?: false
         runCatching { context.unregisterReceiver(bondReceiver) }
+        bondRegistered = false
+        bondAddress = null
+        bondContinuation = null
         return result
     }
 
     fun dispose() {
         stopScan()
         runCatching { context.unregisterReceiver(stateReceiver) }
-        runCatching { context.unregisterReceiver(bondReceiver) }
+        if (bondRegistered) {
+            runCatching { context.unregisterReceiver(bondReceiver) }
+            bondRegistered = false
+        }
+        resumeBond(false)
     }
 
     // ------------------------------------------------------------------ interno
@@ -218,11 +295,13 @@ class BluetoothManager(
 
     private fun addDevice(device: BluetoothDevice) {
         val name = device.displayName()
-        _devices.value = _devices.value
-            .filter { it.address != device.address } +
-            BtDeviceUi(name, device.address, device.bondState == BluetoothDevice.BOND_BONDED)
-        _devices.value = _devices.value
-            .sortedWith(compareByDescending<BtDeviceUi> { it.bonded }.thenBy { it.name })
+        val bonded = try {
+            device.bondState == BluetoothDevice.BOND_BONDED
+        } catch (_: SecurityException) {
+            false
+        }
+        val updated = _devices.value.filter { it.address != device.address } + BtDeviceUi(name, device.address, bonded)
+        _devices.value = updated.sortedWith(compareByDescending<BtDeviceUi> { it.bonded }.thenBy { it.name })
     }
 
     private fun BluetoothDevice.displayName(): String = try {
